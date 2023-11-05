@@ -1,0 +1,15 @@
+version: "3.8"
+services:
+  pubsub-emulator:
+    build:
+      context: ./pubsub
+      dockerfile: Dockerfile
+    container_name: pubsub-emulator
+    image: pubsub-emulator:expedit-v1.0.0
+    environment:
+      # First element is the project name
+      # Then, the syntax to create topics and subs is topic1_name:sub1_name,topic2_name:sub2_1_name:subs2_2_name
+      # Can specify multiple project using PUBSUB_PROJECT2, PUBSUB_PROJECT3, ...
+      - PUBSUB_PROJECT1=local-project
+    ports:
+      - "127.0.0.1:8585:8585"
