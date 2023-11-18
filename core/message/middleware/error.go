@@ -7,7 +7,7 @@ import (
 
 func PanicRecoverer() Middleware {
 	return func(next message.HandlerFunc) message.HandlerFunc {
-		return func(msg *message.Message) (err error) {
+		return func(msg *message.Message[any]) (err error) {
 			defer func() {
 				if r := recover(); r != nil {
 					if e, ok := r.(error); ok {
@@ -22,9 +22,9 @@ func PanicRecoverer() Middleware {
 	}
 }
 
-func OnError(errHandler func(msg *message.Message, err error)) Middleware {
+func OnError(errHandler func(msg *message.Message[any], err error)) Middleware {
 	return func(next message.HandlerFunc) message.HandlerFunc {
-		return func(msg *message.Message) (err error) {
+		return func(msg *message.Message[any]) (err error) {
 			err = next(msg)
 			if err != nil {
 				errHandler(msg, err)

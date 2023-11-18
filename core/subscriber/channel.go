@@ -6,7 +6,7 @@ import (
 )
 
 type ChannelSubscriber struct {
-	inputCh       chan *message.Message
+	inputCh       chan *message.Message[any]
 	maxConcurrent int
 }
 
@@ -15,8 +15,8 @@ func (c *ChannelSubscriber) Close() error {
 	return nil
 }
 
-func (c *ChannelSubscriber) Subscribe() (<-chan *message.Message, error) {
-	outputCh := make(chan *message.Message, c.maxConcurrent)
+func (c *ChannelSubscriber) Subscribe() (<-chan *message.Message[any], error) {
+	outputCh := make(chan *message.Message[any], c.maxConcurrent)
 	go func() {
 		p := pool.New().WithMaxGoroutines(c.maxConcurrent)
 		for msg := range c.inputCh {
@@ -34,7 +34,7 @@ func (c *ChannelSubscriber) Subscribe() (<-chan *message.Message, error) {
 	return outputCh, nil
 }
 
-func NewChannelSubscriber(inputCh chan *message.Message, maxConcurrent int) *ChannelSubscriber {
+func NewChannelSubscriber(inputCh chan *message.Message[any], maxConcurrent int) *ChannelSubscriber {
 	return &ChannelSubscriber{
 		inputCh:       inputCh,
 		maxConcurrent: maxConcurrent,

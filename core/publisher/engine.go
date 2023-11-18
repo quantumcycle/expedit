@@ -36,7 +36,7 @@ func (p *PublishingEngine) Publish(msg *message.Message) error {
 		p.lock.Lock()
 		defer p.lock.Unlock()
 		if p.handlerFn == nil {
-			p.handlerFn = p.mc.Wrap(func(msg *message.Message) error {
+			p.handlerFn = p.mc.Wrap(func(msg *message.Message[any]) error {
 				return p.pub.Publish(msg)
 			})
 		}

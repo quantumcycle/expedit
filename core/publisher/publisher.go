@@ -7,5 +7,5 @@ import (
 
 type Publisher interface {
 	io.Closer
-	Publish(message *message.Message) error
+	Publish(message *message.Message[any]) error
 }

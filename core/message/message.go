@@ -1,14 +1,13 @@
 package message
 
 import (
-	"bytes"
 	"context"
 	"maps"
+	"reflect"
 	"sync"
 )
 
 type Metadata map[string]string
-type Payload []byte
 
 type State int
 
@@ -18,18 +17,18 @@ const (
 	Nack
 )
 
-type Message struct {
+type Message[T any] struct {
 	ID        string   `json:"id"`
 	Metadata  Metadata `json:"metadata"`
-	Payload   Payload  `json:"payload"`
+	Payload   T        `json:"payload"`
 	ctx       context.Context
 	mutex     sync.Mutex
 	state     State
 	stateChan chan State
 }
 
-func NewMessage(ctx context.Context, UUID string, payload Payload) *Message {
-	return &Message{
+func NewMessage[T any](ctx context.Context, UUID string, payload T) *Message[T] {
+	return &Message[T]{
 		ID:        UUID,
 		Metadata:  make(map[string]string),
 		Payload:   payload,
@@ -39,12 +38,12 @@ func NewMessage(ctx context.Context, UUID string, payload Payload) *Message {
 	}
 }
 
-func (m *Message) WithMetadata(key, value string) *Message {
+func (m *Message[T]) WithMetadata(key, value string) *Message[T] {
 	m.Metadata[key] = value
 	return m
 }
 
-func (m *Message) Ack() bool {
+func (m *Message[T]) Ack() bool {
 	if m.state == Ack {
 		return true
 	}
@@ -61,7 +60,7 @@ func (m *Message) Ack() bool {
 	return true
 }
 
-func (m *Message) Nack() bool {
+func (m *Message[T]) Nack() bool {
 	if m.state == Nack {
 		return true
 	}
@@ -78,31 +77,31 @@ func (m *Message) Nack() bool {
 	return true
 }
 
-func (m *Message) StateChange() <-chan State {
+func (m *Message[T]) StateChange() <-chan State {
 	return m.stateChan
 }
 
-func (m *Message) State() State {
+func (m *Message[T]) State() State {
 	return m.state
 }
 
-func (m *Message) Context() context.Context {
+func (m *Message[T]) Context() context.Context {
 	return m.ctx
 }
 
-func (m *Message) SetContext(ctx context.Context) *Message {
+func (m *Message[T]) SetContext(ctx context.Context) *Message[T] {
 	m.ctx = ctx
 	return m
 }
 
-func (m *Message) Copy() *Message {
+func (m *Message[T]) Copy() *Message[T] {
 	msg := NewMessage(m.ctx, m.ID, m.Payload)
 	msg.Metadata = maps.Clone(m.Metadata)
 	return msg
 }
 
 // Equals compare, that two messages are equal. Acks/Nacks are not compared.
-func (m *Message) Equals(toCompare *Message) bool {
+func (m *Message[T]) Equals(toCompare *Message[T]) bool {
 	if m.ID != toCompare.ID {
 		return false
 	}
@@ -114,5 +113,5 @@ func (m *Message) Equals(toCompare *Message) bool {
 			return false
 		}
 	}
-	return bytes.Equal(m.Payload, toCompare.Payload)
+	return reflect.DeepEqual(m.Payload, toCompare.Payload)
 }

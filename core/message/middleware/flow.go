@@ -9,7 +9,7 @@ import (
 // ContextTimeout creates a new context with the given timeout and sets it on the message
 func ContextTimeout(timeout time.Duration) Middleware {
 	return func(next message.HandlerFunc) message.HandlerFunc {
-		return func(msg *message.Message) error {
+		return func(msg *message.Message[any]) error {
 			ctx, cancel := context.WithTimeout(msg.Context(), timeout)
 			defer func() {
 				cancel()
@@ -26,7 +26,7 @@ func ContextTimeout(timeout time.Duration) Middleware {
 func Throttle(max int, perDuration time.Duration) Middleware {
 	ticker := time.NewTicker(perDuration / time.Duration(max))
 	return func(next message.HandlerFunc) message.HandlerFunc {
-		return func(msg *message.Message) error {
+		return func(msg *message.Message[any]) error {
 			<-ticker.C
 			return next(msg)
 		}

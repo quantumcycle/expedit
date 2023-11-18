@@ -47,13 +47,13 @@ func main() {
 
 	pubEngine := publisher.NewPublishingEngine(channelPub)
 	pubEngine.AddMiddleware(middleware.Throttle(1, time.Second))
-	publisherLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
+	publisherLabelsProducer := func(msg *message.Message[any], err error) prometheus.Labels {
 		return prometheus.Labels{"publisher": "my_publisher"}
 	}
 	pubEngine.AddMiddleware(middleware.PrometheusMetricsCountVec(outgoingMsgCount, publisherLabelsProducer))
 	pubEngine.AddMiddleware(middleware.PrometheusMetricsDurationVec(outgoingMsgDuration, publisherLabelsProducer))
 
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("{}")))
+	err = pubEngine.Publish(message.NewMessage[[]byte](context.Background(), uuid.New().String(), []byte("{}")))
 	if err != nil {
 		panic(err)
 	}

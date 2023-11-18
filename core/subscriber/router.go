@@ -17,10 +17,10 @@ type SubscriptionRouter struct {
 }
 
 type RoutingKey string
-type RoutingKeyGenerator = func(msg *message.Message) RoutingKey
+type RoutingKeyGenerator = func(msg *message.Message[any]) RoutingKey
 
 func RouteFromMetadataKey(metadataKey string) RoutingKeyGenerator {
-	return func(msg *message.Message) RoutingKey {
+	return func(msg *message.Message[any]) RoutingKey {
 		val := msg.Metadata[metadataKey]
 		return RoutingKey(val)
 	}
@@ -46,7 +46,7 @@ func (d *SubscriptionRouter) AddDefaultHandler(handler message.HandlerFunc) {
 }
 
 func (d *SubscriptionRouter) HandlerFunc() message.HandlerFunc {
-	return func(msg *message.Message) error {
+	return func(msg *message.Message[any]) error {
 		dispatchType := d.generator(msg)
 		handler := d.routesByType[string(dispatchType)]
 		if handler != nil {
@@ -60,7 +60,7 @@ func (d *SubscriptionRouter) HandlerFunc() message.HandlerFunc {
 }
 
 func NewJSONMessageTypedHandler[T any](handler func(ctx context.Context, msgID string, metadata map[string]string, event *T) error) message.HandlerFunc {
-	handlerFn := func(msg *message.Message) error {
+	handlerFn := func(msg *message.Message[any]) error {
 		event := new(T)
 		err := json.Unmarshal(msg.Payload, event)
 		if err != nil {

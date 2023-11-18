@@ -5,6 +5,6 @@ import (
 )
 
 type Subscriber interface {
-	Subscribe() (<-chan *message.Message, error)
+	Subscribe() (<-chan *message.Message[any], error)
 	Close() error
 }

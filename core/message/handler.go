@@ -1,3 +1,3 @@
 package message
 
-type HandlerFunc func(msg *Message) error
+type HandlerFunc func(msg *Message[any]) error

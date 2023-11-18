@@ -17,8 +17,8 @@ type SubscriptionEngine struct {
 	handlerFn message.HandlerFunc
 }
 
-type OnPanicListener = func(msg *message.Message, r any)
-type OnErrorListener = func(msg *message.Message, err error)
+type OnPanicListener = func(msg *message.Message[any], r any)
+type OnErrorListener = func(msg *message.Message[any], err error)
 
 func NewSubscriptionEngine(sub Subscriber, router SubscriptionRouter) *SubscriptionEngine {
 	engine := &SubscriptionEngine{
@@ -80,7 +80,7 @@ func (e *SubscriptionEngine) Start() error {
 }
 
 func handleMessage(
-	msg *message.Message,
+	msg *message.Message[any],
 	handler message.HandlerFunc,
 	onError OnErrorListener,
 	onPanic OnPanicListener) {
