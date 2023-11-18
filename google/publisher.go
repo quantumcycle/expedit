@@ -12,6 +12,7 @@ var ErrClosed = errors.New("publisher is closed")
 var DefaultPublishTimeout = 60 * time.Second
 
 type OrderingKeyProvider func(message *message.Message) string
+type AttributesProvider func(message *message.Message) map[string]string
 
 type PublisherOption struct {
 	// RoutingFunc is a function that returns a topic name for a given message. It's a required option.
@@ -20,6 +21,8 @@ type PublisherOption struct {
 	Marshaller MessageMarshaller
 	// OrderingKeyProvider is a function that returns an ordering key for a given message. If not provided, no ordering key is used.
 	OrderingKeyProvider OrderingKeyProvider
+	// AttributesProvider is a function that returns attributes for a given message. If not provided, no attributes are used.
+	AttributesProvider AttributesProvider
 	// PublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
 	PublishTimeout time.Duration
 }
@@ -28,7 +31,7 @@ type DestinationTopic string
 
 type RoutingFunc func(msg *message.Message) (DestinationTopic, error)
 
-func ConstantTopic(topic string) RoutingFunc {
+func ConstantTopic(topic DestinationTopic) RoutingFunc {
 	return func(msg *message.Message) (DestinationTopic, error) {
 		return DestinationTopic(topic), nil
 	}
@@ -46,6 +49,7 @@ type GooglePublisher struct {
 	client              *pubsub.Client
 	publishTimeout      time.Duration
 	orderingKeyProvider OrderingKeyProvider
+	attrProvider        AttributesProvider
 	routingFunc         RoutingFunc
 	marshaller          MessageMarshaller
 	lock                sync.RWMutex
@@ -64,13 +68,15 @@ func NewGooglePublisher(c *pubsub.Client, opts PublisherOption) (*GooglePublishe
 		opts.Marshaller = DefaultMessageMarshaller
 	}
 	p := &GooglePublisher{
-		client:         c,
-		routingFunc:    opts.RoutingFunc,
-		publishTimeout: opts.PublishTimeout,
-		topics:         make(map[DestinationTopic]*pubsub.Topic),
-		lock:           sync.RWMutex{},
-		closed:         false,
-		marshaller:     opts.Marshaller,
+		client:              c,
+		routingFunc:         opts.RoutingFunc,
+		publishTimeout:      opts.PublishTimeout,
+		topics:              make(map[DestinationTopic]*pubsub.Topic),
+		lock:                sync.RWMutex{},
+		closed:              false,
+		marshaller:          opts.Marshaller,
+		attrProvider:        opts.AttributesProvider,
+		orderingKeyProvider: opts.OrderingKeyProvider,
 	}
 	return p, nil
 }
@@ -90,6 +96,12 @@ func (p *GooglePublisher) Publish(message *message.Message) error {
 	pubMsg, err := p.marshaller(message)
 	if err != nil {
 		return err
+	}
+	if p.orderingKeyProvider != nil {
+		pubMsg.OrderingKey = p.orderingKeyProvider(message)
+	}
+	if p.attrProvider != nil {
+		pubMsg.Attributes = p.attrProvider(message)
 	}
 	topic.Publish(message.Context(), pubMsg)
 	return nil
@@ -111,7 +123,11 @@ func (p *GooglePublisher) topic(topic DestinationTopic) (t *pubsub.Topic, err er
 		p.lock.Unlock()
 	}()
 
-	return p.client.Topic(string(topic)), nil
+	pubTopic := p.client.Topic(string(topic))
+	if p.orderingKeyProvider != nil {
+		pubTopic.EnableMessageOrdering = true
+	}
+	return pubTopic, nil
 }
 
 func (p *GooglePublisher) Close() error {

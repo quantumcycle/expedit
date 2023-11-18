@@ -1,0 +1,8 @@
+version: '3'
+
+tasks:
+  test:
+    desc: "Run all the tests in core module"
+    cmds:
+      - pwd
+      - go test ./...

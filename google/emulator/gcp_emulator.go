@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/lithammer/shortuuid/v3"
+	"github.com/quantumcycle/expedit/google"
 )
 
 type PubsubTestClient struct {
@@ -33,7 +34,7 @@ type TestTopic struct {
 	client     *pubsub.Client
 	Prefix     string
 	Identifier string
-	Name       string
+	Name       google.DestinationTopic
 }
 
 func (c PubsubTestClient) CreateTestTopic(ctx context.Context, identifier string) *TestTopic {
@@ -48,12 +49,12 @@ func (c PubsubTestClient) CreateTestTopic(ctx context.Context, identifier string
 		client:     c.client,
 		Prefix:     prefix,
 		Identifier: identifier,
-		Name:       topicName,
+		Name:       google.DestinationTopic(topicName),
 	}
 }
 
 func (tt TestTopic) Delete(ctx context.Context) {
-	err := tt.client.Topic(tt.Name).Delete(ctx)
+	err := tt.client.Topic(string(tt.Name)).Delete(ctx)
 	if err != nil {
 		panic(err)
 	}
@@ -66,11 +67,12 @@ type TestSubscription struct {
 	Name       string
 }
 
-func (tt TestTopic) CreateTestSubscription(ctx context.Context, identifier string) *TestSubscription {
+func (tt TestTopic) CreateTestSubscription(ctx context.Context, identifier string, ordered bool) *TestSubscription {
 	subsName := fmt.Sprintf("%s%s", tt.Prefix, identifier)
-	topic := tt.client.Topic(tt.Name)
+	topic := tt.client.Topic(string(tt.Name))
 	_, err := tt.client.CreateSubscription(ctx, subsName, pubsub.SubscriptionConfig{
-		Topic: topic,
+		Topic:                 topic,
+		EnableMessageOrdering: ordered,
 	})
 	if err != nil {
 		panic(err)
@@ -88,4 +90,17 @@ func (ts TestSubscription) Delete(ctx context.Context) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func (ts TestSubscription) MessageChannel(ctx context.Context, size int) chan *pubsub.Message {
+	ch := make(chan *pubsub.Message, size)
+	go func() {
+		err := ts.client.Subscription(ts.Name).Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
+			ch <- m
+		})
+		if err != nil {
+			panic(err)
+		}
+	}()
+	return ch
 }

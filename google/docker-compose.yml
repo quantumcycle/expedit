@@ -1,0 +1,7 @@
+version: '3'
+services:
+  pubsub:
+    image: google/cloud-sdk:454.0.0
+    entrypoint: gcloud --quiet beta emulators pubsub start --host-port=0.0.0.0:29085
+    ports:
+      - "29085:29085"

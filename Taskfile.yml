@@ -1,0 +1,20 @@
+version: '3'
+
+includes:
+  core:
+    taskfile: ./core/task.yml
+    dir: ./core
+  google:
+    taskfile: ./google/task.yml
+    dir: ./google
+  redis:
+    taskfile: ./redis/task.yml
+    dir: ./redis
+
+tasks:
+  test:
+    desc: "Run all the tests in all modules"
+    cmds:
+      - task: core:test
+      - task: google:test
+      - task: redis:test
