@@ -2,7 +2,7 @@ package subscriber
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"github.com/quantumcycle/expedit/core/message"
 )
 
@@ -59,14 +59,13 @@ func (d *SubscriptionRouter) HandlerFunc() message.HandlerFunc {
 	}
 }
 
-func NewJSONMessageTypedHandler[T any](handler func(ctx context.Context, msgID string, metadata map[string]string, event *T) error) message.HandlerFunc {
+func NewTypedMessageHandler[T any](handler func(ctx context.Context, msgID string, metadata map[string]string, event T) error) message.HandlerFunc {
 	handlerFn := func(msg *message.Message) error {
-		event := new(T)
-		err := json.Unmarshal(msg.Payload, event)
-		if err != nil {
-			return err
+		pl := msg.Payload
+		if typed, ok := pl.(T); ok {
+			return handler(msg.Context(), msg.ID, msg.Metadata, typed)
 		}
-		return handler(msg.Context(), msg.ID, msg.Metadata, event)
+		return errors.New("payload type does not match handler type")
 	}
 	return handlerFn
 }

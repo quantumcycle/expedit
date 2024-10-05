@@ -1,6 +1,5 @@
-version: '3'
 services:
-  pubsub:
+  expedit-redis:
     image: redis:alpine3.18
     ports:
       - "29379:6379"

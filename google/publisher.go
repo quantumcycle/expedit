@@ -2,144 +2,120 @@ package google
 
 import (
 	"cloud.google.com/go/pubsub"
+	"context"
+	"encoding/json"
 	"errors"
 	"github.com/quantumcycle/expedit/core/message"
-	"sync"
+	"github.com/quantumcycle/expedit/core/publisher"
 	"time"
 )
 
-var ErrClosed = errors.New("publisher is closed")
 var DefaultPublishTimeout = 60 * time.Second
 
 type OrderingKeyProvider func(message *message.Message) string
 type AttributesProvider func(message *message.Message) map[string]string
 
+func MetadataAsAttributes(msg *message.Message) map[string]string {
+	return msg.Metadata
+}
+
 type PublisherOption struct {
-	// RoutingFunc is a function that returns a topic name for a given message. It's a required option.
-	RoutingFunc RoutingFunc
-	// MessageMarshaller is a function that converts a message to a google Message. DefaultMessageMarshaller is used if not provided.
-	Marshaller MessageMarshaller
 	// OrderingKeyProvider is a function that returns an ordering key for a given message. If not provided, no ordering key is used.
 	OrderingKeyProvider OrderingKeyProvider
 	// AttributesProvider is a function that returns attributes for a given message. If not provided, no attributes are used.
+	// You can use MetadataAsAttributes to use all the message metadata entries as attributes.
 	AttributesProvider AttributesProvider
 	// PublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
 	PublishTimeout time.Duration
 }
 
-type DestinationTopic string
+type PayloadMarshaller func(message *message.Message) ([]byte, error)
 
-type RoutingFunc func(msg *message.Message) (DestinationTopic, error)
-
-func ConstantTopic(topic DestinationTopic) RoutingFunc {
-	return func(msg *message.Message) (DestinationTopic, error) {
-		return DestinationTopic(topic), nil
-	}
+func JSONPayloadMarshaller(message *message.Message) ([]byte, error) {
+	return json.Marshal(message.Payload)
 }
 
 type MessageMarshaller func(msg *message.Message) (*pubsub.Message, error)
 
-func DefaultMessageMarshaller(msg *message.Message) (*pubsub.Message, error) {
-	return &pubsub.Message{
-		Data: msg.Payload,
-	}, nil
+type Publisher struct {
+	internalPublisher *publisher.MessagePublisher[*pubsub.Message]
 }
 
-type GooglePublisher struct {
-	client              *pubsub.Client
-	publishTimeout      time.Duration
-	orderingKeyProvider OrderingKeyProvider
-	attrProvider        AttributesProvider
-	routingFunc         RoutingFunc
-	marshaller          MessageMarshaller
-	lock                sync.RWMutex
-	topics              map[DestinationTopic]*pubsub.Topic
-	closed              bool
+type PubsubTopic struct {
+	topic *pubsub.Topic
 }
 
-func NewGooglePublisher(c *pubsub.Client, opts PublisherOption) (*GooglePublisher, error) {
-	if opts.RoutingFunc == nil {
+func (p PubsubTopic) Close() error {
+	p.topic.Stop()
+	return nil
+}
+
+func (p PubsubTopic) Publish(ctx context.Context, message *pubsub.Message) error {
+	r := p.topic.Publish(ctx, message)
+	if _, err := r.Get(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func NewGooglePublisher(
+	c *pubsub.Client,
+	routingFunc publisher.RoutingFunc,
+	payloadMarshaller PayloadMarshaller,
+	opts PublisherOption) (*Publisher, error) {
+	if c == nil {
+		return nil, errors.New("client is required")
+	}
+	if routingFunc == nil {
 		return nil, errors.New("routing function is required")
+	}
+	if payloadMarshaller == nil {
+		return nil, errors.New("payloadMarshaller is required")
 	}
 	if opts.PublishTimeout == 0 {
 		opts.PublishTimeout = DefaultPublishTimeout
 	}
-	if opts.Marshaller == nil {
-		opts.Marshaller = DefaultMessageMarshaller
+
+	internalPublisher := &publisher.MessagePublisher[*pubsub.Message]{
+		RoutingFunc: routingFunc,
+		MessageMarshaller: func(msg *message.Message) (*pubsub.Message, error) {
+			msgPayload, err := payloadMarshaller(msg)
+			if err != nil {
+				return nil, err
+			}
+			msgImpl := &pubsub.Message{
+				Data: msgPayload,
+			}
+			if opts.OrderingKeyProvider != nil {
+				msgImpl.OrderingKey = opts.OrderingKeyProvider(msg)
+			}
+			if opts.AttributesProvider != nil {
+				msgImpl.Attributes = opts.AttributesProvider(msg)
+			}
+			return msgImpl, nil
+		},
+		PublishTimeout: opts.PublishTimeout,
+		GetDestinationPublisher: func(dest publisher.Destination) (publisher.MessageImplPublisher[*pubsub.Message], error) {
+			pubTopic := c.Topic(string(dest))
+			if opts.OrderingKeyProvider != nil {
+				pubTopic.EnableMessageOrdering = true
+			}
+			return PubsubTopic{
+				topic: pubTopic,
+			}, nil
+		},
 	}
-	p := &GooglePublisher{
-		client:              c,
-		routingFunc:         opts.RoutingFunc,
-		publishTimeout:      opts.PublishTimeout,
-		topics:              make(map[DestinationTopic]*pubsub.Topic),
-		lock:                sync.RWMutex{},
-		closed:              false,
-		marshaller:          opts.Marshaller,
-		attrProvider:        opts.AttributesProvider,
-		orderingKeyProvider: opts.OrderingKeyProvider,
+
+	p := &Publisher{
+		internalPublisher: internalPublisher,
 	}
 	return p, nil
 }
 
-func (p *GooglePublisher) Publish(message *message.Message) error {
-	if p.closed {
-		return ErrClosed
-	}
-	topicName, err := p.routingFunc(message)
-	if err != nil {
-		return err
-	}
-	topic, err := p.topic(topicName)
-	if err != nil {
-		return err
-	}
-	pubMsg, err := p.marshaller(message)
-	if err != nil {
-		return err
-	}
-	if p.orderingKeyProvider != nil {
-		pubMsg.OrderingKey = p.orderingKeyProvider(message)
-	}
-	if p.attrProvider != nil {
-		pubMsg.Attributes = p.attrProvider(message)
-	}
-	topic.Publish(message.Context(), pubMsg)
-	return nil
+func (p *Publisher) Publish(message *message.Message) error {
+	return p.internalPublisher.Publish(message)
 }
 
-func (p *GooglePublisher) topic(topic DestinationTopic) (t *pubsub.Topic, err error) {
-	p.lock.RLock()
-	t, ok := p.topics[topic]
-	p.lock.RUnlock()
-	if ok {
-		return t, nil
-	}
-
-	p.lock.Lock()
-	defer func() {
-		if err == nil {
-			p.topics[topic] = t
-		}
-		p.lock.Unlock()
-	}()
-
-	pubTopic := p.client.Topic(string(topic))
-	if p.orderingKeyProvider != nil {
-		pubTopic.EnableMessageOrdering = true
-	}
-	return pubTopic, nil
-}
-
-func (p *GooglePublisher) Close() error {
-	if p.closed {
-		return nil
-	}
-	p.closed = true
-
-	p.lock.Lock()
-	for _, t := range p.topics {
-		t.Stop()
-	}
-	p.lock.Unlock()
-	return p.client.Close()
+func (p *Publisher) Close() error {
+	return p.internalPublisher.Close()
 }

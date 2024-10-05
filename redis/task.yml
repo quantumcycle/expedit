@@ -4,12 +4,12 @@ tasks:
   dependencies-up:
     desc: Start docker compose dependencies
     cmds:
-      - docker-compose -f ./docker-compose.yml up -d
+      - docker compose -f ./docker-compose.yml up -d
 
   dependencies-down:
     desc: Start docker compose dependencies
     cmds:
-      - docker-compose -f ./docker-compose.yml down
+      - docker compose -f ./docker-compose.yml down
 
   test:
     desc: "Run all the tests in redis module"

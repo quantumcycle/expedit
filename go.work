@@ -5,4 +5,5 @@ use (
 	./example
 	./google
 	./redis
+	./prometheus
 )

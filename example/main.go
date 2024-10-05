@@ -9,6 +9,7 @@ import (
 	"github.com/quantumcycle/expedit/core/message/middleware"
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/quantumcycle/expedit/core/subscriber"
+	promware "github.com/quantumcycle/expedit/prometheus/middleware"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -19,7 +20,6 @@ func main() {
 
 	//****************** Producer **********************
 
-	//ctx := context.Background()
 	var err error
 	channel := make(chan *message.Message, 100)
 
@@ -50,8 +50,8 @@ func main() {
 	publisherLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
 		return prometheus.Labels{"publisher": "my_publisher"}
 	}
-	pubEngine.AddMiddleware(middleware.PrometheusMetricsCountVec(outgoingMsgCount, publisherLabelsProducer))
-	pubEngine.AddMiddleware(middleware.PrometheusMetricsDurationVec(outgoingMsgDuration, publisherLabelsProducer))
+	pubEngine.AddMiddleware(promware.PrometheusMetricsCountVec(outgoingMsgCount, publisherLabelsProducer))
+	pubEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(outgoingMsgDuration, publisherLabelsProducer))
 
 	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("{}")))
 	if err != nil {
@@ -65,12 +65,13 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("{\"prop1\":\"value1\"}")).
+
+	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), DummyEvent1{Prop1: "value1"}).
 		WithMetadata("event_type", "DummyEvent1"))
 	if err != nil {
 		panic(err)
 	}
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("{\"prop2\":\"value2\"}")).
+	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), DummyEvent2{Prop2: "value2"}).
 		WithMetadata("event_type", "DummyEvent2"))
 	if err != nil {
 		panic(err)
@@ -98,7 +99,6 @@ func main() {
 		panic(err)
 	}
 
-	subs := subscriber.NewChannelSubscriber(channel, 10)
 	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
 	router.AddHandler("DummyEvent1", func(msg *message.Message) error {
 		sec := rand.Intn(5) + 2
@@ -108,7 +108,7 @@ func main() {
 		return nil
 	})
 	router.AddHandler("DummyEvent2",
-		subscriber.NewJSONMessageTypedHandler[DummyEvent2](func(ctx context.Context, msgID string, metadata map[string]string, event *DummyEvent2) error {
+		subscriber.NewTypedMessageHandler[DummyEvent2](func(ctx context.Context, msgID string, metadata map[string]string, event DummyEvent2) error {
 			fmt.Printf("Dummy event handler 2 handler received message %s at %s\n", msgID, time.Now().Format(time.StampMilli))
 			return nil
 		}))
@@ -119,8 +119,9 @@ func main() {
 		fmt.Printf("Default handler received message %s at %s finished at %s\n", msg.ID, start.Format(time.StampMilli), time.Now().Format(time.StampMilli))
 		return nil
 	})
+	subs := subscriber.NewChannelSubscriber(channel, 10)
 	subEngine := subscriber.NewSubscriptionEngine(subs, *router)
-	subEngine.SetOnPanicListener(func(msg *message.Message, err interface{}) {
+	subEngine.SetOnPanicListener(func(msg *message.Message, err any) {
 		fmt.Printf("Panic in handler for message %s: %s\n", msg.ID, err)
 	})
 	subEngine.AddMiddleware(middleware.ContextTimeout(30 * time.Second))
@@ -128,15 +129,16 @@ func main() {
 	subscriberLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
 		return prometheus.Labels{"subscriber": "my_subscriber", "success": fmt.Sprintf("%t", err == nil)}
 	}
-	subEngine.AddMiddleware(middleware.PrometheusMetricsCountVec(incomingMsgCount, subscriberLabelsProducer))
-	subEngine.AddMiddleware(middleware.PrometheusMetricsDurationVec(incomingMsgDuration, subscriberLabelsProducer))
+	subEngine.AddMiddleware(promware.PrometheusMetricsCountVec(incomingMsgCount, subscriberLabelsProducer))
+	subEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(incomingMsgDuration, subscriberLabelsProducer))
 	subEngine.AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
-		fmt.Printf("Error in handler for message %s: %s\n", msg.ID, err.Error())
+
+		fmt.Printf("Error in handler for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
 	}))
 	subEngine.AddMiddleware(middleware.PanicRecoverer())
 
 	go func() {
-		err := subEngine.Start()
+		err := subEngine.Start(context.TODO())
 		if err != nil {
 			panic(err)
 		}

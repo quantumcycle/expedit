@@ -1,6 +1,6 @@
 version: '3'
 services:
-  pubsub:
+  expedit-gcp-pubsub:
     image: google/cloud-sdk:454.0.0
     entrypoint: gcloud --quiet beta emulators pubsub start --host-port=0.0.0.0:29085
     ports:

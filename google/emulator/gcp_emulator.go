@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/lithammer/shortuuid/v3"
-	"github.com/quantumcycle/expedit/google"
+	"github.com/quantumcycle/expedit/core/publisher"
 )
 
 type PubsubTestClient struct {
@@ -34,7 +34,7 @@ type TestTopic struct {
 	client     *pubsub.Client
 	Prefix     string
 	Identifier string
-	Name       google.DestinationTopic
+	Name       publisher.Destination
 }
 
 func (c PubsubTestClient) CreateTestTopic(ctx context.Context, identifier string) *TestTopic {
@@ -49,7 +49,7 @@ func (c PubsubTestClient) CreateTestTopic(ctx context.Context, identifier string
 		client:     c.client,
 		Prefix:     prefix,
 		Identifier: identifier,
-		Name:       google.DestinationTopic(topicName),
+		Name:       publisher.Destination(topicName),
 	}
 }
 
@@ -85,6 +85,18 @@ func (tt TestTopic) CreateTestSubscription(ctx context.Context, identifier strin
 	}
 }
 
+func (tt TestTopic) PublishBytes(ctx context.Context, ID string, bytes []byte, attrs map[string]string) {
+	topic := tt.client.Topic(string(tt.Name))
+	r := topic.Publish(ctx, &pubsub.Message{
+		ID:         ID,
+		Attributes: attrs,
+		Data:       bytes,
+	})
+	if _, err := r.Get(ctx); err != nil {
+		panic(err)
+	}
+}
+
 func (ts TestSubscription) Delete(ctx context.Context) {
 	err := ts.client.Subscription(ts.Name).Delete(ctx)
 	if err != nil {
@@ -96,7 +108,22 @@ func (ts TestSubscription) MessageChannel(ctx context.Context, size int) chan *p
 	ch := make(chan *pubsub.Message, size)
 	go func() {
 		err := ts.client.Subscription(ts.Name).Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
+			m.Ack()
 			ch <- m
+		})
+		if err != nil {
+			panic(err)
+		}
+	}()
+	return ch
+}
+
+func (ts TestSubscription) MessageDataChannel(ctx context.Context, size int) chan string {
+	ch := make(chan string, size)
+	go func() {
+		err := ts.client.Subscription(ts.Name).Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
+			m.Ack()
+			ch <- string(m.Data)
 		})
 		if err != nil {
 			panic(err)

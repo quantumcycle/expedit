@@ -1,14 +1,14 @@
 package message
 
 import (
-	"bytes"
 	"context"
 	"maps"
+	"reflect"
 	"sync"
 )
 
 type Metadata map[string]string
-type Payload []byte
+type Payload any
 
 type State int
 
@@ -19,18 +19,18 @@ const (
 )
 
 type Message struct {
-	ID        string   `json:"id"`
-	Metadata  Metadata `json:"metadata"`
-	Payload   Payload  `json:"payload"`
+	ID        string
+	Metadata  Metadata
+	Payload   Payload
 	ctx       context.Context
 	mutex     sync.Mutex
 	state     State
 	stateChan chan State
 }
 
-func NewMessage(ctx context.Context, UUID string, payload Payload) *Message {
+func NewMessage(ctx context.Context, id string, payload Payload) *Message {
 	return &Message{
-		ID:        UUID,
+		ID:        id,
 		Metadata:  make(map[string]string),
 		Payload:   payload,
 		ctx:       ctx,
@@ -114,5 +114,5 @@ func (m *Message) Equals(toCompare *Message) bool {
 			return false
 		}
 	}
-	return bytes.Equal(m.Payload, toCompare.Payload)
+	return reflect.DeepEqual(m.Payload, toCompare.Payload)
 }

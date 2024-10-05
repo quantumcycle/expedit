@@ -1,11 +1,106 @@
 package publisher
 
 import (
+	"context"
+	"errors"
 	"github.com/quantumcycle/expedit/core/message"
 	"io"
+	"sync"
+	"time"
 )
 
 type Publisher interface {
 	io.Closer
 	Publish(message *message.Message) error
+}
+
+var ErrClosed = errors.New("publisher is closed")
+
+// Destination is analogous to a topic in google pubsub, a stream in redis or kafka or a queue in RabbitMQ.
+type Destination string
+type RoutingFunc func(msg *message.Message) (Destination, error)
+
+// ConstantDestination is a routing function implementation that always returns the same destination.
+func ConstantDestination(d Destination) RoutingFunc {
+	return func(msg *message.Message) (Destination, error) {
+		return d, nil
+	}
+}
+
+type MessageImplPublisher[T any] interface {
+	io.Closer
+	Publish(ctx context.Context, message T) error
+}
+
+// MessagePublisher is a helper struct to help with the implementation of a Publisher implementation.
+// T is the generic type of a message in the implementation
+// It keeps a list of internal publishers, one for each destination.
+type MessagePublisher[T any] struct {
+	RoutingFunc             RoutingFunc
+	MessageMarshaller       func(msg *message.Message) (T, error)
+	GetDestinationPublisher func(d Destination) (MessageImplPublisher[T], error)
+	PublishTimeout          time.Duration
+
+	lock       sync.RWMutex
+	publishers map[Destination]MessageImplPublisher[T]
+	closed     bool
+}
+
+func (p *MessagePublisher[T]) Publish(message *message.Message) error {
+	if p.closed {
+		return ErrClosed
+	}
+	destName, err := p.RoutingFunc(message)
+	if err != nil {
+		return err
+	}
+	pub, err := p.GetDestinationPublisher(destName)
+	if err != nil {
+		return err
+	}
+	msgImpl, err := p.MessageMarshaller(message)
+	if err != nil {
+		return err
+	}
+
+	return pub.Publish(message.Context(), msgImpl)
+}
+
+func (p *MessagePublisher[T]) getPublisher(dest Destination) (pub MessageImplPublisher[T], err error) {
+	p.lock.RLock()
+	t, ok := p.publishers[dest]
+	p.lock.RUnlock()
+	if ok {
+		return t, nil
+	}
+
+	p.lock.Lock()
+	defer func() {
+		if err == nil {
+			p.publishers[dest] = t
+		}
+		p.lock.Unlock()
+	}()
+
+	pub, err = p.GetDestinationPublisher(dest)
+	if err != nil {
+		return nil, err
+	}
+	return pub, nil
+}
+
+func (p *MessagePublisher[T]) Close() error {
+	if p.closed {
+		return nil
+	}
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	for _, t := range p.publishers {
+		err := t.Close()
+		if err != nil {
+			return err
+		}
+	}
+	p.closed = true
+	return nil
 }

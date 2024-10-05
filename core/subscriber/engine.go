@@ -1,6 +1,7 @@
 package subscriber
 
 import (
+	"context"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/message/middleware"
 	"sync"
@@ -55,7 +56,7 @@ func (p *SubscriptionEngine) AddMiddleware(m middleware.Middleware) *Subscriptio
 	return p
 }
 
-func (e *SubscriptionEngine) Start() error {
+func (e *SubscriptionEngine) Start(ctx context.Context) error {
 	if e.handlerFn == nil {
 		e.lock.Lock()
 		defer e.lock.Unlock()
@@ -65,7 +66,7 @@ func (e *SubscriptionEngine) Start() error {
 	} else {
 		panic("cannot start subscription engine twice")
 	}
-	msgChannel, err := e.sub.Subscribe()
+	msgChannel, err := e.sub.Subscribe(ctx)
 	if err != nil {
 		return err
 	}
