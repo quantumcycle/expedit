@@ -16,8 +16,6 @@ jobs:
         with:
           go-version: '1.23'
 
-      - run: docker compose -f ./docker/docker-compose-ci.yml up -d
-
       - name: Install task
         run: go install github.com/go-task/task/v3/cmd/task@v3.39.2
 
