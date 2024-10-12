@@ -69,14 +69,10 @@ const (
 func NewRedisSubscriber(
 	c *redis.Client,
 	stream string,
-	unmarshaller MessageUnmarshaller,
 	opts SubscriberOption) (*Subscriber, error) {
 
 	if c == nil {
 		return nil, errors.New("client is required")
-	}
-	if unmarshaller == nil {
-		return nil, errors.New("unmarshaller is required")
 	}
 
 	if opts.ProcessingTimeout <= 0 {
@@ -99,7 +95,7 @@ func NewRedisSubscriber(
 			//TODO: see the XCLAIM comment above
 		},
 		MessageUnmarshall: func(ctx context.Context, wrapper MessageWrapper) (*message.Message, error) {
-			return unmarshaller(ctx, wrapper.msg)
+			return message.NewMessage(ctx, wrapper.msg.ID, wrapper.msg.Values), nil
 		},
 		OnUnmarshallingError: opts.OnUnmarshallingError,
 		ProcessingTimeout:    opts.ProcessingTimeout,

@@ -8,18 +8,13 @@ import (
 )
 
 type SubscriptionEngine struct {
-	sub     Subscriber
-	router  SubscriptionRouter
-	mc      *middleware.Chain
-	onPanic OnPanicListener
-	onError OnErrorListener
+	sub    Subscriber
+	router SubscriptionRouter
+	mc     *middleware.Chain
 
 	lock      sync.Mutex
 	handlerFn message.HandlerFunc
 }
-
-type OnPanicListener = func(msg *message.Message, r any)
-type OnErrorListener = func(msg *message.Message, err error)
 
 func NewSubscriptionEngine(sub Subscriber, router SubscriptionRouter) *SubscriptionEngine {
 	engine := &SubscriptionEngine{
@@ -30,22 +25,6 @@ func NewSubscriptionEngine(sub Subscriber, router SubscriptionRouter) *Subscript
 		handlerFn: nil,
 	}
 	return engine
-}
-
-func (p *SubscriptionEngine) SetOnPanicListener(listener OnPanicListener) *SubscriptionEngine {
-	if p.handlerFn != nil {
-		panic("cannot alter engine after subscription has started")
-	}
-	p.onPanic = listener
-	return p
-}
-
-func (p *SubscriptionEngine) SetOnErrorListener(listener OnErrorListener) *SubscriptionEngine {
-	if p.handlerFn != nil {
-		panic("cannot alter engine after subscription has started")
-	}
-	p.onError = listener
-	return p
 }
 
 func (p *SubscriptionEngine) AddMiddleware(m middleware.Middleware) *SubscriptionEngine {
@@ -74,7 +53,7 @@ func (e *SubscriptionEngine) Start(ctx context.Context) error {
 		//Avoid golang loop variable issue
 		loopMsg := msg
 		go func() {
-			handleMessage(loopMsg, e.handlerFn, e.onError, e.onPanic)
+			handleMessage(loopMsg, e.handlerFn)
 		}()
 	}
 	return nil
@@ -82,22 +61,18 @@ func (e *SubscriptionEngine) Start(ctx context.Context) error {
 
 func handleMessage(
 	msg *message.Message,
-	handler message.HandlerFunc,
-	onError OnErrorListener,
-	onPanic OnPanicListener) {
+	handler message.HandlerFunc) {
 	defer func() {
+		//intercept panic to nack the message, and then resume the panic
 		if recovered := recover(); recovered != nil {
-			if onPanic != nil {
-				onPanic(msg, recovered)
-			}
 			msg.Nack()
+			//continue the panic
+			//if you don't want a panic, add a middleware to recover from panics
+			panic(recovered)
 		}
 	}()
 	err := handler(msg)
 	if err != nil {
-		if onError != nil {
-			onError(msg, err)
-		}
 		msg.Nack()
 		return
 	}

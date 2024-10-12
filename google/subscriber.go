@@ -34,19 +34,13 @@ type Subscriber struct {
 	internalSubscriber *subscriber.MessageSubscriber[*pubsub.Message]
 }
 
-type PayloadUnmarshaller func(msg *pubsub.Message) (message.Payload, error)
-
 func NewGoogleSubscriber(
 	c *pubsub.Client,
 	subscription string,
-	unmarshaller PayloadUnmarshaller,
 	opts SubscriberOption) (*Subscriber, error) {
 
 	if c == nil {
 		return nil, errors.New("client is required")
-	}
-	if unmarshaller == nil {
-		return nil, errors.New("unmarshaller is required")
 	}
 
 	if opts.ProcessingTimeout <= 0 {
@@ -61,11 +55,7 @@ func NewGoogleSubscriber(
 			msg.Nack()
 		},
 		MessageUnmarshall: func(ctx context.Context, pubMsg *pubsub.Message) (*message.Message, error) {
-			payload, err := unmarshaller(pubMsg)
-			if err != nil {
-				return nil, err
-			}
-			msg := message.NewMessage(ctx, pubMsg.ID, payload)
+			msg := message.NewMessage(ctx, pubMsg.ID, pubMsg.Data)
 			msg.Metadata = pubMsg.Attributes
 			return msg, nil
 		},

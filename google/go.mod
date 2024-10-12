@@ -1,13 +1,15 @@
 module github.com/quantumcycle/expedit/google
 
-go 1.21
+go 1.22
+
+toolchain go1.22.8
 
 require (
 	cloud.google.com/go/pubsub v1.33.0
 	github.com/google/uuid v1.3.0
 	github.com/joho/godotenv v1.5.1
 	github.com/lithammer/shortuuid/v3 v3.0.7
-	github.com/onsi/ginkgo/v2 v2.12.0
+	github.com/onsi/ginkgo/v2 v2.20.2
 	github.com/onsi/gomega v1.28.0
 	github.com/quantumcycle/expedit/core v0.0.0-20231105182610-67cd4c7c3f88
 )

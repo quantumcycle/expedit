@@ -9,10 +9,9 @@ import (
 	"github.com/quantumcycle/expedit/core/message/middleware"
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/quantumcycle/expedit/core/subscriber"
+	examples "github.com/quantumcycle/expedit/example"
 	promware "github.com/quantumcycle/expedit/prometheus/middleware"
 	"math/rand"
-	"os"
-	"os/signal"
 	"time"
 )
 
@@ -24,80 +23,27 @@ func main() {
 	channel := make(chan *message.Message, 100)
 
 	channelPub := publisher.NewChannelPublisher(channel)
-
-	outgoingMsgCount := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "test",
-		Subsystem: "test",
-		Name:      "outgoing_test_counter",
-	}, []string{"publisher"})
-	err = prometheus.DefaultRegisterer.Register(outgoingMsgCount)
-	if err != nil {
-		panic(err)
-	}
-
-	outgoingMsgDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "test",
-		Subsystem: "test",
-		Name:      "outgoing_test_duration",
-	}, []string{"publisher"})
-	err = prometheus.DefaultRegisterer.Register(outgoingMsgDuration)
-	if err != nil {
-		panic(err)
-	}
-
 	pubEngine := publisher.NewPublishingEngine(channelPub)
 	pubEngine.AddMiddleware(middleware.Throttle(1, time.Second))
 	publisherLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
 		return prometheus.Labels{"publisher": "my_publisher"}
 	}
-	pubEngine.AddMiddleware(promware.PrometheusMetricsCountVec(outgoingMsgCount, publisherLabelsProducer))
-	pubEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(outgoingMsgDuration, publisherLabelsProducer))
+	pubEngine.AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromOutgoingCount(), publisherLabelsProducer))
+	pubEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromOutgoingDuration(), publisherLabelsProducer))
+	pubEngine.AddMiddleware(middleware.PanicRecoverer())
 
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("{}")))
-	if err != nil {
-		panic(err)
-	}
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("{}")))
-	if err != nil {
-		panic(err)
-	}
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("{}")))
-	if err != nil {
-		panic(err)
-	}
-
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), DummyEvent1{Prop1: "value1"}).
+	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), examples.DummyEvent1{Prop1: "value1"}).
 		WithMetadata("event_type", "DummyEvent1"))
 	if err != nil {
 		panic(err)
 	}
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), DummyEvent2{Prop2: "value2"}).
+	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), examples.DummyEvent2{Prop2: "value2"}).
 		WithMetadata("event_type", "DummyEvent2"))
 	if err != nil {
 		panic(err)
 	}
 
 	//***************** Consumer **********************
-
-	incomingMsgCount := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "test",
-		Subsystem: "test",
-		Name:      "incoming_test_counter",
-	}, []string{"subscriber", "success"})
-	err = prometheus.DefaultRegisterer.Register(incomingMsgCount)
-	if err != nil {
-		panic(err)
-	}
-
-	incomingMsgDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Namespace: "test",
-		Subsystem: "test",
-		Name:      "incoming_test_duration",
-	}, []string{"subscriber", "success"})
-	err = prometheus.DefaultRegisterer.Register(incomingMsgDuration)
-	if err != nil {
-		panic(err)
-	}
 
 	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
 	router.AddHandler("DummyEvent1", func(msg *message.Message) error {
@@ -108,7 +54,7 @@ func main() {
 		return nil
 	})
 	router.AddHandler("DummyEvent2",
-		subscriber.NewTypedMessageHandler[DummyEvent2](func(ctx context.Context, msgID string, metadata map[string]string, event DummyEvent2) error {
+		subscriber.NewTypedMessageHandler[examples.DummyEvent2](func(ctx context.Context, msgID string, metadata map[string]string, event examples.DummyEvent2) error {
 			fmt.Printf("Dummy event handler 2 handler received message %s at %s\n", msgID, time.Now().Format(time.StampMilli))
 			return nil
 		}))
@@ -129,10 +75,9 @@ func main() {
 	subscriberLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
 		return prometheus.Labels{"subscriber": "my_subscriber", "success": fmt.Sprintf("%t", err == nil)}
 	}
-	subEngine.AddMiddleware(promware.PrometheusMetricsCountVec(incomingMsgCount, subscriberLabelsProducer))
-	subEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(incomingMsgDuration, subscriberLabelsProducer))
+	subEngine.AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromIncomingCount(), subscriberLabelsProducer))
+	subEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromIncomingDuration(), subscriberLabelsProducer))
 	subEngine.AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
-
 		fmt.Printf("Error in handler for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
 	}))
 	subEngine.AddMiddleware(middleware.PanicRecoverer())
@@ -146,36 +91,8 @@ func main() {
 
 	//****************** Main loop **********************
 	waitCh := make(chan bool, 1)
-	CleanupOnInterrupt("main_wait", func() {
+	examples.CleanupOnInterrupt("main_wait", func() {
 		waitCh <- true
 	})
 	<-waitCh
-}
-
-type DummyEvent1 struct {
-	Prop1 string `json:"prop1"`
-}
-
-type DummyEvent2 struct {
-	Prop2 string `json:"prop2"`
-}
-
-func CleanupOnInterrupt(name string, fn func()) {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt)
-
-	go func() {
-		<-sigs
-		fn()
-		fmt.Printf("Cleanup done for %s\n", name)
-	}()
-}
-
-type channelCloser struct {
-	ch chan bool
-}
-
-func (c channelCloser) Close() error {
-	close(c.ch)
-	return nil
 }

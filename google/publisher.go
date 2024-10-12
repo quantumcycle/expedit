@@ -23,7 +23,8 @@ type PublisherOption struct {
 	// OrderingKeyProvider is a function that returns an ordering key for a given message. If not provided, no ordering key is used.
 	OrderingKeyProvider OrderingKeyProvider
 	// AttributesProvider is a function that returns attributes for a given message. If not provided, no attributes are used.
-	// You can use MetadataAsAttributes to use all the message metadata entries as attributes.
+	// A provider to set the attribute on the pubsub message.
+	// By default, it's using MetadataAsAttributes which converts all metadata entries as attributes.
 	AttributesProvider AttributesProvider
 	// PublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
 	PublishTimeout time.Duration
@@ -74,6 +75,9 @@ func NewGooglePublisher(
 	}
 	if opts.PublishTimeout == 0 {
 		opts.PublishTimeout = DefaultPublishTimeout
+	}
+	if opts.AttributesProvider == nil {
+		opts.AttributesProvider = MetadataAsAttributes
 	}
 
 	internalPublisher := &publisher.MessagePublisher[*pubsub.Message]{

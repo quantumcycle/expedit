@@ -5,7 +5,7 @@ import (
 	"github.com/quantumcycle/expedit/core/message"
 )
 
-func PanicRecoverer() Middleware {
+func ConvertPanicToError() Middleware {
 	return func(next message.HandlerFunc) message.HandlerFunc {
 		return func(msg *message.Message) (err error) {
 			defer func() {

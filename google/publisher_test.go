@@ -141,6 +141,7 @@ var _ = Describe("Google Publisher", Ordered, func() {
 				publisher.ConstantDestination(topic.Name),
 				SimpleMarshaller,
 				google.PublisherOption{
+					//Same key for every mesasge, so they should be ALL received in order
 					OrderingKeyProvider: func(msg *message.Message) string {
 						//use the same key for all messages, so they should be received in order
 						return "test-key"

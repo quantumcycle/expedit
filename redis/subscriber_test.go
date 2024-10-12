@@ -12,10 +12,6 @@ import (
 	"time"
 )
 
-func SimpleUnmarshaller(ctx context.Context, msg *redis.XMessage) (*message.Message, error) {
-	return message.NewMessage(ctx, msg.ID, msg.Values), nil
-}
-
 func asyncCountMessages(count *int, ch <-chan *message.Message, duration time.Duration) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), duration)
@@ -50,19 +46,9 @@ var _ = Describe("Redis Subscriber", func() {
 	It("should return an error if the client is missing", func() {
 		_, err := subredis.NewRedisSubscriber(nil,
 			newStreamName(),
-			SimpleUnmarshaller,
 			subredis.SubscriberOption{})
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("client is required"))
-	})
-
-	It("should return an error if the unmarshaller is missing", func() {
-		_, err := subredis.NewRedisSubscriber(client,
-			newStreamName(),
-			nil,
-			subredis.SubscriberOption{})
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("unmarshaller is required"))
 	})
 
 	When("using consumer groups", func() {
@@ -74,7 +60,6 @@ var _ = Describe("Redis Subscriber", func() {
 
 			subscriber, err := subredis.NewRedisSubscriber(client,
 				stream,
-				SimpleUnmarshaller,
 				subredis.SubscriberOption{
 					ConsumerGroup: "test-group",
 				})
@@ -94,7 +79,6 @@ var _ = Describe("Redis Subscriber", func() {
 			//Create 2 subscriber in the same consumer group. The messages should be distributed across the 2
 			subscriber1, err := subredis.NewRedisSubscriber(client,
 				stream,
-				SimpleUnmarshaller,
 				subredis.SubscriberOption{
 					ConsumerGroup:                      "test-group",
 					ConsumerGroupCreateStreamIfMissing: true,
@@ -107,7 +91,6 @@ var _ = Describe("Redis Subscriber", func() {
 
 			subscriber2, err := subredis.NewRedisSubscriber(client,
 				stream,
-				SimpleUnmarshaller,
 				subredis.SubscriberOption{
 					ConsumerGroup: "test-group",
 				})
@@ -149,7 +132,6 @@ var _ = Describe("Redis Subscriber", func() {
 
 			subscriber, err := subredis.NewRedisSubscriber(client,
 				stream,
-				SimpleUnmarshaller,
 				subredis.SubscriberOption{
 					StartID: subredis.StartFromBeginning,
 				})
@@ -184,7 +166,6 @@ var _ = Describe("Redis Subscriber", func() {
 
 			subscriber, err := subredis.NewRedisSubscriber(client,
 				stream,
-				SimpleUnmarshaller,
 				subredis.SubscriberOption{
 					StartID: subredis.StartFromBeginning,
 				})

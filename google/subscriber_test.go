@@ -12,10 +12,6 @@ import (
 	"time"
 )
 
-func SimpleUnmarshaller(pubMsg *pubsub.Message) (message.Payload, error) {
-	return pubMsg.Data, nil
-}
-
 func asyncCountMessages(count *int, ch <-chan *message.Message, duration time.Duration) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), duration)
@@ -49,19 +45,9 @@ var _ = Describe("Google Subscriber", func() {
 	It("should return an error if the client is missing", func() {
 		_, err := google.NewGoogleSubscriber(nil,
 			"test-subscription",
-			SimpleUnmarshaller,
 			google.SubscriberOption{})
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("client is required"))
-	})
-
-	It("should return an error if the unmarshaller is missing", func() {
-		_, err := google.NewGoogleSubscriber(client,
-			"test-subscription",
-			nil,
-			google.SubscriberOption{})
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("unmarshaller is required"))
 	})
 
 	It("should return an error if the subscription doesnt exist", func() {
@@ -70,7 +56,6 @@ var _ = Describe("Google Subscriber", func() {
 
 		subscriber, err := google.NewGoogleSubscriber(client,
 			"non-existing-subscription",
-			SimpleUnmarshaller,
 			google.SubscriberOption{})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -86,7 +71,6 @@ var _ = Describe("Google Subscriber", func() {
 
 		subscriber, err := google.NewGoogleSubscriber(client,
 			subscription.Name,
-			SimpleUnmarshaller,
 			google.SubscriberOption{})
 		Expect(err).NotTo(HaveOccurred())
 
@@ -116,7 +100,6 @@ var _ = Describe("Google Subscriber", func() {
 		timeoutOccured := false
 		subscriber, err := google.NewGoogleSubscriber(client,
 			subscription.Name,
-			SimpleUnmarshaller,
 			google.SubscriberOption{
 				ProcessingTimeout: 1 * time.Second,
 				OnProcessingTimeout: func(ctx context.Context, msg *pubsub.Message) {
@@ -147,7 +130,6 @@ var _ = Describe("Google Subscriber", func() {
 
 		subscriber, err := google.NewGoogleSubscriber(client,
 			subscription.Name,
-			SimpleUnmarshaller,
 			google.SubscriberOption{})
 		defer subscriber.Close()
 		Expect(err).NotTo(HaveOccurred())
@@ -191,7 +173,6 @@ var _ = Describe("Google Subscriber", func() {
 
 		subscriber, err := google.NewGoogleSubscriber(client,
 			subscription.Name,
-			SimpleUnmarshaller,
 			google.SubscriberOption{})
 		Expect(err).NotTo(HaveOccurred())
 

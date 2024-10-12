@@ -29,7 +29,7 @@ Check the code in the [example](example/main.go) folder for a working example.
 |-------------------|:--------:|----------------------------------|
 | Golang channel    |   Beta   | Publisher and subscriber written |
 | Google GCP Pubsub |   Beta   | Publisher and subscriber written |
-| Redis stream      |  Alpha   | Only publisher written           |
+| Redis stream      |  Alpha   | Some corner cases to address     |
 | Kafka             | Planned  |                                  |
 
 ## Definitions
