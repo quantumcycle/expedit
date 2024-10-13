@@ -44,7 +44,6 @@ func createPublisher(client *pubsub.Client, topic publisher.Destination) (*publi
 	}
 	pubEngine := publisher.NewPublishingEngine(pub)
 	pubEngine.
-		AddMiddleware(middleware.Throttle(1, time.Second)).
 		AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromOutgoingCount([]string{"publisher", "error"}), publisherLabelsProducer)).
 		AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromOutgoingDuration([]string{"publisher", "error"}), publisherLabelsProducer)).
 		AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
@@ -56,6 +55,27 @@ func createPublisher(client *pubsub.Client, topic publisher.Destination) (*publi
 		AddMiddleware(google.MarshallPayloadToJson())
 
 	return pubEngine, nil
+}
+
+func createSubscriber(client *pubsub.Client, subscription string, router *subscriber.SubscriptionRouter) (*subscriber.SubscriptionEngine, error) {
+	googleSub, err := google.NewGoogleSubscriber(client,
+		subscription,
+		google.SubscriberOption{})
+	if err != nil {
+		return nil, err
+	}
+	subEngine := subscriber.NewSubscriptionEngine(googleSub, *router)
+	subscriberLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
+		return prometheus.Labels{"subscriber": "my_subscriber", "error": strconv.FormatBool(err != nil)}
+	}
+	subEngine.
+		AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromIncomingCount([]string{"subscriber", "error"}), subscriberLabelsProducer)).
+		AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromIncomingDuration([]string{"subscriber", "error"}), subscriberLabelsProducer)).
+		AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
+			fmt.Printf("Error in handler for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
+		})).
+		AddMiddleware(middleware.ConvertPanicToError())
+	return subEngine, nil
 }
 
 func AddStructNameToMetadata() middleware.Middleware {
@@ -90,22 +110,24 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	err = pubEngine.Publish(message.NewMessage(ctx, "id-1", examples.DummyEvent1{Prop1: "value1"}))
+	msg := message.NewMessage(ctx, "id-1", examples.DummyEvent1{Prop1: "value1"})
+	err = pubEngine.Publish(msg)
 
 	//***************** Consumer **********************
 	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
 	router.
 		AddHandler("DummyEvent1").
 		AddMiddleware(google.UnmarshallPayloadFromJson(examples.DummyEvent1{})).
-		Handle(func(msg *message.Message) error {
-			dummyEvent1 := msg.Payload.(examples.DummyEvent1)
+		Handle(message.HandleWithPayload(func(msg *message.Message, dummyEvent1 examples.DummyEvent1) error {
 			sec := rand.Intn(5) + 2
 			start := time.Now()
+			fmt.Println("Sleeping for", sec, "seconds")
 			time.Sleep(time.Duration(sec) * time.Second)
 			fmt.Printf("Dummy event handler 1 handler received message %s with prop1=[%s] at %s finished at %s\n",
 				msg.ID, dummyEvent1.Prop1, start.Format(time.StampMilli), time.Now().Format(time.StampMilli))
 			return nil
-		})
+		}))
+
 	router.AddDefaultHandler(func(msg *message.Message) error {
 		sec := rand.Intn(5) + 2
 		start := time.Now()
@@ -115,21 +137,7 @@ func main() {
 		return nil
 	})
 
-	googleSub, err := google.NewGoogleSubscriber(client,
-		subscription.Name,
-		google.SubscriberOption{})
-	subEngine := subscriber.NewSubscriptionEngine(googleSub, *router)
-	subscriberLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
-		return prometheus.Labels{"subscriber": "my_subscriber", "error": strconv.FormatBool(err != nil)}
-	}
-	subEngine.
-		AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromIncomingCount([]string{"subscriber", "error"}), subscriberLabelsProducer)).
-		AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromIncomingDuration([]string{"subscriber", "error"}), subscriberLabelsProducer)).
-		AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
-			fmt.Printf("Error in handler for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
-		})).
-		AddMiddleware(middleware.ConvertPanicToError())
-
+	subEngine, err := createSubscriber(client, subscription.Name, router)
 	go func() {
 		err := subEngine.Start(context.TODO())
 		if err != nil {
