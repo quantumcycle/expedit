@@ -15,12 +15,12 @@ type DummyEvent2 struct {
 	Prop2 string `json:"prop2"`
 }
 
-func CreatePromOutgoingCount() *prometheus.CounterVec {
+func CreatePromOutgoingCount(labels []string) *prometheus.CounterVec {
 	outgoingMsgCount := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "test",
 		Subsystem: "test",
 		Name:      "outgoing_test_counter",
-	}, []string{"publisher"})
+	}, labels)
 	err := prometheus.DefaultRegisterer.Register(outgoingMsgCount)
 	if err != nil {
 		panic(err)
@@ -28,12 +28,12 @@ func CreatePromOutgoingCount() *prometheus.CounterVec {
 	return outgoingMsgCount
 }
 
-func CreatePromOutgoingDuration() *prometheus.HistogramVec {
+func CreatePromOutgoingDuration(labels []string) *prometheus.HistogramVec {
 	outgoingMsgDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "test",
 		Subsystem: "test",
 		Name:      "outgoing_test_duration",
-	}, []string{"publisher"})
+	}, labels)
 	err := prometheus.DefaultRegisterer.Register(outgoingMsgDuration)
 	if err != nil {
 		panic(err)
@@ -41,12 +41,12 @@ func CreatePromOutgoingDuration() *prometheus.HistogramVec {
 	return outgoingMsgDuration
 }
 
-func CreatePromIncomingCount() *prometheus.CounterVec {
+func CreatePromIncomingCount(labels []string) *prometheus.CounterVec {
 	incomingMsgCount := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "test",
 		Subsystem: "test",
 		Name:      "incoming_test_counter",
-	}, []string{"subscriber", "success"})
+	}, labels)
 	err := prometheus.DefaultRegisterer.Register(incomingMsgCount)
 	if err != nil {
 		panic(err)
@@ -54,12 +54,12 @@ func CreatePromIncomingCount() *prometheus.CounterVec {
 	return incomingMsgCount
 }
 
-func CreatePromIncomingDuration() *prometheus.HistogramVec {
+func CreatePromIncomingDuration(labels []string) *prometheus.HistogramVec {
 	incomingMsgDuration := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "test",
 		Subsystem: "test",
 		Name:      "incoming_test_duration",
-	}, []string{"subscriber", "success"})
+	}, labels)
 	err := prometheus.DefaultRegisterer.Register(incomingMsgDuration)
 	if err != nil {
 		panic(err)

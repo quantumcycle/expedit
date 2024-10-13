@@ -62,16 +62,12 @@ func (p PubsubTopic) Publish(ctx context.Context, message *pubsub.Message) error
 func NewGooglePublisher(
 	c *pubsub.Client,
 	routingFunc publisher.RoutingFunc,
-	payloadMarshaller PayloadMarshaller,
 	opts PublisherOption) (*Publisher, error) {
 	if c == nil {
 		return nil, errors.New("client is required")
 	}
 	if routingFunc == nil {
 		return nil, errors.New("routing function is required")
-	}
-	if payloadMarshaller == nil {
-		return nil, errors.New("payloadMarshaller is required")
 	}
 	if opts.PublishTimeout == 0 {
 		opts.PublishTimeout = DefaultPublishTimeout
@@ -83,12 +79,11 @@ func NewGooglePublisher(
 	internalPublisher := &publisher.MessagePublisher[*pubsub.Message]{
 		RoutingFunc: routingFunc,
 		MessageMarshaller: func(msg *message.Message) (*pubsub.Message, error) {
-			msgPayload, err := payloadMarshaller(msg)
-			if err != nil {
-				return nil, err
+			if _, ok := msg.Payload.([]byte); !ok {
+				return nil, errors.New("payload must be []byte. Use a middleware to convert the payload to []byte")
 			}
 			msgImpl := &pubsub.Message{
-				Data: msgPayload,
+				Data: msg.Payload.([]byte),
 			}
 			if opts.OrderingKeyProvider != nil {
 				msgImpl.OrderingKey = opts.OrderingKeyProvider(msg)

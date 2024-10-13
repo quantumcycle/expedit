@@ -20,13 +20,6 @@ func ExpectNbMessages[T any](ch <-chan T, nb int, timeout time.Duration) {
 	}, timeout).Should(Equal(nb))
 }
 
-func SimpleMarshaller(msg *message.Message) ([]byte, error) {
-	if b, ok := msg.Payload.([]byte); ok {
-		return b, nil
-	}
-	panic("payload must be []byte")
-}
-
 var _ = Describe("Google Publisher", Ordered, func() {
 	var client *pubsub.Client
 	var emuClient *emulator.PubsubTestClient
@@ -46,7 +39,6 @@ var _ = Describe("Google Publisher", Ordered, func() {
 		_, err := google.NewGooglePublisher(
 			nil,
 			publisher.ConstantDestination(topic.Name),
-			SimpleMarshaller,
 			google.PublisherOption{})
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("client is required"))
@@ -56,20 +48,9 @@ var _ = Describe("Google Publisher", Ordered, func() {
 		_, err := google.NewGooglePublisher(
 			client,
 			nil,
-			SimpleMarshaller,
 			google.PublisherOption{})
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("routing function is required"))
-	})
-
-	It("should return an error if the marshaller is missing", func() {
-		_, err := google.NewGooglePublisher(
-			client,
-			publisher.ConstantDestination(topic.Name),
-			nil,
-			google.PublisherOption{})
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("payloadMarshaller is required"))
 	})
 
 	It("should use the routing function to determine the target topic", func() {
@@ -90,7 +71,6 @@ var _ = Describe("Google Publisher", Ordered, func() {
 		}
 		pub, err := google.NewGooglePublisher(client,
 			routingFn,
-			SimpleMarshaller,
 			google.PublisherOption{
 				OrderingKeyProvider: func(msg *message.Message) string {
 					//use the same key for all messages, so they should be received in order
@@ -116,7 +96,6 @@ var _ = Describe("Google Publisher", Ordered, func() {
 
 			pub, err := google.NewGooglePublisher(client,
 				publisher.ConstantDestination(topic.Name),
-				SimpleMarshaller,
 				google.PublisherOption{
 					AttributesProvider: func(msg *message.Message) map[string]string {
 						return msg.Metadata
@@ -139,7 +118,6 @@ var _ = Describe("Google Publisher", Ordered, func() {
 
 			pub, err := google.NewGooglePublisher(client,
 				publisher.ConstantDestination(topic.Name),
-				SimpleMarshaller,
 				google.PublisherOption{
 					//Same key for every mesasge, so they should be ALL received in order
 					OrderingKeyProvider: func(msg *message.Message) string {

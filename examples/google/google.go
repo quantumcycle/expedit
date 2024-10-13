@@ -3,14 +3,12 @@ package main
 import (
 	"cloud.google.com/go/pubsub"
 	"context"
-	"encoding/json"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/message/middleware"
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/quantumcycle/expedit/core/subscriber"
-	"github.com/quantumcycle/expedit/core/unmarshaller"
 	examples "github.com/quantumcycle/expedit/example"
 	"github.com/quantumcycle/expedit/google"
 	"github.com/quantumcycle/expedit/google/emulator"
@@ -22,22 +20,50 @@ import (
 	"time"
 )
 
-func JSONPayloadMarshaller(msg *message.Message) ([]byte, error) {
-	return json.Marshal(msg.Payload)
-}
-
-var payloadUnmarshaller = unmarshaller.JSONUnmarshaller{}
-
-func JSONByTypeUnmarshaller(msg *pubsub.Message) (message.Payload, error) {
-	name := msg.Attributes["event_type"]
-	return payloadUnmarshaller.CreateBytesUnmarshaller()(name, msg.Data)
-}
-
 func getTypeName(myvar interface{}) string {
 	if t := reflect.TypeOf(myvar); t.Kind() == reflect.Ptr {
 		return "*" + t.Elem().Name()
 	} else {
 		return t.Name()
+	}
+}
+
+func createPublisher(client *pubsub.Client, topic publisher.Destination) (*publisher.PublishingEngine, error) {
+	// no routing. send everything to our single topic
+	routingFn := func(msg *message.Message) (publisher.Destination, error) {
+		return topic, nil
+	}
+	pub, err := google.NewGooglePublisher(client,
+		routingFn,
+		google.PublisherOption{})
+	if err != nil {
+		return nil, err
+	}
+	publisherLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
+		return prometheus.Labels{"publisher": "my_publisher", "error": strconv.FormatBool(err != nil)}
+	}
+	pubEngine := publisher.NewPublishingEngine(pub)
+	pubEngine.
+		AddMiddleware(middleware.Throttle(1, time.Second)).
+		AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromOutgoingCount([]string{"publisher", "error"}), publisherLabelsProducer)).
+		AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromOutgoingDuration([]string{"publisher", "error"}), publisherLabelsProducer)).
+		AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
+			fmt.Printf("Error in publisher for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
+		})).
+		AddMiddleware(middleware.ConvertPanicToError()).
+		//need to be before the Marshall step so we can have the original struct name
+		AddMiddleware(AddStructNameToMetadata()).
+		AddMiddleware(google.MarshallPayloadToJson())
+
+	return pubEngine, nil
+}
+
+func AddStructNameToMetadata() middleware.Middleware {
+	return func(next message.HandlerFunc) message.HandlerFunc {
+		return func(msg *message.Message) error {
+			msg.Metadata["event_type"] = getTypeName(msg.Payload)
+			return next(msg)
+		}
 	}
 }
 
@@ -60,47 +86,34 @@ func main() {
 		panic(err)
 	}
 
-	// no routing. send everything to our single topic
-	routingFn := func(msg *message.Message) (publisher.Destination, error) {
-		return topic.Name, nil
+	pubEngine, err := createPublisher(client, topic.Name)
+	if err != nil {
+		panic(err)
 	}
-	pub, err := google.NewGooglePublisher(client,
-		routingFn,
-		JSONPayloadMarshaller,
-		google.PublisherOption{})
-	pubEngine := publisher.NewPublishingEngine(pub)
-	pubEngine.AddMiddleware(middleware.Throttle(1, time.Second))
-
-	publisherLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
-		return prometheus.Labels{"publisher": "my_publisher", "error": strconv.FormatBool(err != nil)}
-	}
-	pubEngine.AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromOutgoingCount(), publisherLabelsProducer))
-	pubEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromOutgoingDuration(), publisherLabelsProducer))
-	pubEngine.AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
-		fmt.Printf("Error in publisher for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
-	}))
-	pubEngine.AddMiddleware(middleware.ConvertPanicToError())
-
 	err = pubEngine.Publish(message.NewMessage(ctx, "id-1", examples.DummyEvent1{Prop1: "value1"}))
 
 	//***************** Consumer **********************
 	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
-	router.AddHandler("DummyEvent1", func(msg *message.Message) error {
-		sec := rand.Intn(5) + 2
-		start := time.Now()
-		time.Sleep(time.Duration(sec) * time.Second)
-		fmt.Printf("Dummy event handler 1 handler received message %s at %s finished at %s\n", msg.ID, start.Format(time.StampMilli), time.Now().Format(time.StampMilli))
-		return nil
-	})
+	router.
+		AddHandler("DummyEvent1").
+		AddMiddleware(google.UnmarshallPayloadFromJson(examples.DummyEvent1{})).
+		Handle(func(msg *message.Message) error {
+			dummyEvent1 := msg.Payload.(examples.DummyEvent1)
+			sec := rand.Intn(5) + 2
+			start := time.Now()
+			time.Sleep(time.Duration(sec) * time.Second)
+			fmt.Printf("Dummy event handler 1 handler received message %s with prop1=[%s] at %s finished at %s\n",
+				msg.ID, dummyEvent1.Prop1, start.Format(time.StampMilli), time.Now().Format(time.StampMilli))
+			return nil
+		})
 	router.AddDefaultHandler(func(msg *message.Message) error {
 		sec := rand.Intn(5) + 2
 		start := time.Now()
 		time.Sleep(time.Duration(sec) * time.Second)
-		fmt.Printf("Default handler received message %s at %s finished at %s\n", msg.ID, start.Format(time.StampMilli), time.Now().Format(time.StampMilli))
+		fmt.Printf("Default handler received message %s at %s finished at %s\n",
+			msg.ID, start.Format(time.StampMilli), time.Now().Format(time.StampMilli))
 		return nil
 	})
-
-	payloadUnmarshaller.AddType("DummyEvent1", examples.DummyEvent1{})
 
 	googleSub, err := google.NewGoogleSubscriber(client,
 		subscription.Name,
@@ -109,12 +122,13 @@ func main() {
 	subscriberLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
 		return prometheus.Labels{"subscriber": "my_subscriber", "error": strconv.FormatBool(err != nil)}
 	}
-	subEngine.AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromIncomingCount(), subscriberLabelsProducer))
-	subEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromIncomingDuration(), subscriberLabelsProducer))
-	subEngine.AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
-		fmt.Printf("Error in handler for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
-	}))
-	subEngine.AddMiddleware(middleware.ConvertPanicToError())
+	subEngine.
+		AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromIncomingCount([]string{"subscriber", "error"}), subscriberLabelsProducer)).
+		AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromIncomingDuration([]string{"subscriber", "error"}), subscriberLabelsProducer)).
+		AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
+			fmt.Printf("Error in handler for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
+		})).
+		AddMiddleware(middleware.ConvertPanicToError())
 
 	go func() {
 		err := subEngine.Start(context.TODO())

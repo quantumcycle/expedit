@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/quantumcycle/expedit/core/message"
+	"github.com/quantumcycle/expedit/core/message/middleware"
 )
 
 type TypedMessageHandler[T any] interface {
@@ -12,7 +13,7 @@ type TypedMessageHandler[T any] interface {
 
 type SubscriptionRouter struct {
 	generator    RoutingKeyGenerator
-	routesByType map[string]message.HandlerFunc
+	routesByType map[string]*HandlerBuilder
 	defaultRoute message.HandlerFunc
 }
 
@@ -29,12 +30,31 @@ func RouteFromMetadataKey(metadataKey string) RoutingKeyGenerator {
 func NewRouter(generator RoutingKeyGenerator) *SubscriptionRouter {
 	return &SubscriptionRouter{
 		generator:    generator,
-		routesByType: map[string]message.HandlerFunc{},
+		routesByType: map[string]*HandlerBuilder{},
 	}
 }
 
-func (d *SubscriptionRouter) AddHandler(value string, handler message.HandlerFunc) {
-	d.routesByType[value] = handler
+type HandlerBuilder struct {
+	handler message.HandlerFunc
+	mc      *middleware.Chain
+}
+
+func (hb *HandlerBuilder) AddMiddleware(m middleware.Middleware) *HandlerBuilder {
+	hb.mc.Add(m)
+	return hb
+}
+
+func (hb *HandlerBuilder) Handle(handler message.HandlerFunc) {
+	hb.handler = handler
+}
+
+func (d *SubscriptionRouter) AddHandler(value string) *HandlerBuilder {
+	builder := &HandlerBuilder{
+		handler: nil,
+		mc:      middleware.NewChain(),
+	}
+	d.routesByType[value] = builder
+	return builder
 }
 
 func (d *SubscriptionRouter) AddDefaultHandler(handler message.HandlerFunc) {
@@ -48,9 +68,10 @@ func (d *SubscriptionRouter) AddDefaultHandler(handler message.HandlerFunc) {
 func (d *SubscriptionRouter) HandlerFunc() message.HandlerFunc {
 	return func(msg *message.Message) error {
 		dispatchType := d.generator(msg)
-		handler := d.routesByType[string(dispatchType)]
-		if handler != nil {
-			return handler(msg)
+		handlerBuilder := d.routesByType[string(dispatchType)]
+		if handlerBuilder != nil && handlerBuilder.handler != nil {
+			handlerFn := handlerBuilder.mc.Wrap(handlerBuilder.handler)
+			return handlerFn(msg)
 		}
 		if d.defaultRoute != nil {
 			return d.defaultRoute(msg)
