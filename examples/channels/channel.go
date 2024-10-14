@@ -45,7 +45,7 @@ func main() {
 
 	//***************** Consumer **********************
 
-	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"), subscriber.SubscriptionRouterOptions{})
+	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
 	router.AddHandler("DummyEvent1").
 		Handle(message.HandleWithPayload(func(msg *message.Message, dummyEvent1 examples.DummyEvent1) error {
 			sec := rand.Intn(5) + 2

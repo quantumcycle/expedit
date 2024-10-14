@@ -11,15 +11,43 @@ import (
 
 var DefaultPublishTimeout = 60 * time.Second
 
-type PublisherOption struct {
-	// IDGenerator is a function that returns an ID for a given message to be send to redis. If not provided, redis will generate the ID.
-	IDGenerator IDGenerator
-	// Maxlen is a redis stream concept to limit the size of a stream. Old entries are evicted once maxlen is reached. If not provided, no limit is used.
-	Maxlen int64
-	// Approx is an optimization flag in redis stream, because it's costly to evict from a stream up to Maxlen. With approx=true, redis will evict up to Maxlen, but not exactly Maxlen, so there could be a bit more than Maxlen items in the stream. If not provided, approx=false is used.
-	Approx bool
-	// PublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
-	PublishTimeout time.Duration
+type PublisherOption func(*PublisherOptions)
+
+// PublisherOptions holds configuration options for a Publisher.
+type PublisherOptions struct {
+	idGenerator    IDGenerator
+	maxlen         int64
+	approx         bool
+	publishTimeout time.Duration
+}
+
+// WithIDGenerator is a function that returns an ID for a given message to be send to redis. If not provided, redis will generate the ID.
+func WithIDGenerator(idGen IDGenerator) PublisherOption {
+	return func(opts *PublisherOptions) {
+		opts.idGenerator = idGen
+	}
+}
+
+// WithMaxlen is a redis stream concept to limit the size of a stream. Old entries are evicted once maxlen is reached. If not provided, no limit is used.
+func WithMaxlen(maxlen int64) PublisherOption {
+	return func(opts *PublisherOptions) {
+		opts.maxlen = maxlen
+	}
+}
+
+// WithApprox Approx is an optimization flag in redis stream, because it's costly to evict from a stream up to Maxlen.
+// With approx=true, redis will evict up to Maxlen, but not exactly Maxlen, so there could be a bit more than Maxlen items in the stream. If not provided, approx=false is used.
+func WithApprox(approx bool) PublisherOption {
+	return func(opts *PublisherOptions) {
+		opts.approx = approx
+	}
+}
+
+// WithPublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
+func WithPublishTimeout(timeout time.Duration) PublisherOption {
+	return func(opts *PublisherOptions) {
+		opts.publishTimeout = timeout
+	}
 }
 
 type IDGenerator func(msg *message.Message) (string, error)
@@ -49,7 +77,7 @@ func NewRedisPublisher(
 	c *redis.Client,
 	routingFunc publisher.RoutingFunc,
 	marshaller MessageMarshaller,
-	opts PublisherOption) (*Publisher, error) {
+	opts ...PublisherOption) (*Publisher, error) {
 	if c == nil {
 		return nil, errors.New("client is required")
 	}
@@ -59,8 +87,13 @@ func NewRedisPublisher(
 	if marshaller == nil {
 		return nil, errors.New("marshaller is required")
 	}
-	if opts.PublishTimeout == 0 {
-		opts.PublishTimeout = DefaultPublishTimeout
+
+	options := PublisherOptions{
+		publishTimeout: DefaultPublishTimeout,
+	}
+
+	for _, opt := range opts {
+		opt(&options)
 	}
 
 	internalPublisher := &publisher.MessagePublisher[*redis.XAddArgs]{
@@ -71,20 +104,20 @@ func NewRedisPublisher(
 				return nil, err
 			}
 			var id = ""
-			if opts.IDGenerator != nil {
-				id, err = opts.IDGenerator(msg)
+			if options.idGenerator != nil {
+				id, err = options.idGenerator(msg)
 				if err != nil {
 					return nil, err
 				}
 			}
 			return &redis.XAddArgs{
 				Values: values,
-				MaxLen: opts.Maxlen,
-				Approx: opts.Approx,
+				MaxLen: options.maxlen,
+				Approx: options.approx,
 				ID:     id,
 			}, nil
 		},
-		PublishTimeout: opts.PublishTimeout,
+		PublishTimeout: options.publishTimeout,
 		GetDestinationPublisher: func(dest publisher.Destination) (publisher.MessageImplPublisher[*redis.XAddArgs], error) {
 			st := Stream{
 				client: c,

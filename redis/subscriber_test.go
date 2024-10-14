@@ -45,8 +45,7 @@ var _ = Describe("Redis Subscriber", func() {
 
 	It("should return an error if the client is missing", func() {
 		_, err := subredis.NewRedisSubscriber(nil,
-			newStreamName(),
-			subredis.SubscriberOption{})
+			newStreamName())
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("client is required"))
 	})
@@ -60,9 +59,7 @@ var _ = Describe("Redis Subscriber", func() {
 
 			subscriber, err := subredis.NewRedisSubscriber(client,
 				stream,
-				subredis.SubscriberOption{
-					ConsumerGroup: "test-group",
-				})
+				subredis.WithConsumerGroup("test-group"))
 			Expect(err).NotTo(HaveOccurred())
 
 			_, err = subscriber.Subscribe(ctx)
@@ -79,11 +76,9 @@ var _ = Describe("Redis Subscriber", func() {
 			//Create 2 subscriber in the same consumer group. The messages should be distributed across the 2
 			subscriber1, err := subredis.NewRedisSubscriber(client,
 				stream,
-				subredis.SubscriberOption{
-					ConsumerGroup:                      "test-group",
-					ConsumerGroupCreateStreamIfMissing: true,
-					ConsumerGroupStartID:               subredis.StartFromBeginning,
-				})
+				subredis.WithConsumerGroup("test-group"),
+				subredis.WithConsumerGroupCreateStreamIfMissing(true),
+				subredis.WithConsumerGroupStartID(subredis.StartFromBeginning))
 			Expect(err).NotTo(HaveOccurred())
 			msgCh1, err := subscriber1.Subscribe(ctx)
 			Expect(err).NotTo(HaveOccurred())
@@ -91,9 +86,7 @@ var _ = Describe("Redis Subscriber", func() {
 
 			subscriber2, err := subredis.NewRedisSubscriber(client,
 				stream,
-				subredis.SubscriberOption{
-					ConsumerGroup: "test-group",
-				})
+				subredis.WithConsumerGroup("test-group"))
 			Expect(err).NotTo(HaveOccurred())
 			msgCh2, err := subscriber2.Subscribe(ctx)
 			Expect(err).NotTo(HaveOccurred())
@@ -132,9 +125,7 @@ var _ = Describe("Redis Subscriber", func() {
 
 			subscriber, err := subredis.NewRedisSubscriber(client,
 				stream,
-				subredis.SubscriberOption{
-					StartID: subredis.StartFromBeginning,
-				})
+				subredis.WithStartID(subredis.StartFromBeginning))
 			Expect(err).NotTo(HaveOccurred())
 
 			msgCh, err := subscriber.Subscribe(ctx)
@@ -166,9 +157,7 @@ var _ = Describe("Redis Subscriber", func() {
 
 			subscriber, err := subredis.NewRedisSubscriber(client,
 				stream,
-				subredis.SubscriberOption{
-					StartID: subredis.StartFromBeginning,
-				})
+				subredis.WithStartID(subredis.StartFromBeginning))
 			Expect(err).NotTo(HaveOccurred())
 
 			msgCh, err := subscriber.Subscribe(ctx)

@@ -44,8 +44,7 @@ var _ = Describe("Google Subscriber", func() {
 
 	It("should return an error if the client is missing", func() {
 		_, err := google.NewGoogleSubscriber(nil,
-			"test-subscription",
-			google.SubscriberOption{})
+			"test-subscription")
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("client is required"))
 	})
@@ -55,8 +54,7 @@ var _ = Describe("Google Subscriber", func() {
 		defer cancel()
 
 		subscriber, err := google.NewGoogleSubscriber(client,
-			"non-existing-subscription",
-			google.SubscriberOption{})
+			"non-existing-subscription")
 		Expect(err).NotTo(HaveOccurred())
 
 		_, err = subscriber.Subscribe(ctx)
@@ -70,8 +68,7 @@ var _ = Describe("Google Subscriber", func() {
 		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
 
 		subscriber, err := google.NewGoogleSubscriber(client,
-			subscription.Name,
-			google.SubscriberOption{})
+			subscription.Name)
 		Expect(err).NotTo(HaveOccurred())
 
 		msgCh, err := subscriber.Subscribe(ctx)
@@ -100,12 +97,10 @@ var _ = Describe("Google Subscriber", func() {
 		timeoutOccured := false
 		subscriber, err := google.NewGoogleSubscriber(client,
 			subscription.Name,
-			google.SubscriberOption{
-				ProcessingTimeout: 1 * time.Second,
-				OnProcessingTimeout: func(ctx context.Context, msg *pubsub.Message) {
-					timeoutOccured = true
-				},
-			})
+			google.WithProcessingTimeout(1*time.Second),
+			google.WithProcessingTimeoutHandler(func(ctx context.Context, msg *pubsub.Message) {
+				timeoutOccured = true
+			}))
 		Expect(err).NotTo(HaveOccurred())
 
 		_, err = subscriber.Subscribe(ctx)
@@ -129,8 +124,7 @@ var _ = Describe("Google Subscriber", func() {
 		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
 
 		subscriber, err := google.NewGoogleSubscriber(client,
-			subscription.Name,
-			google.SubscriberOption{})
+			subscription.Name)
 		defer subscriber.Close()
 		Expect(err).NotTo(HaveOccurred())
 
@@ -172,8 +166,7 @@ var _ = Describe("Google Subscriber", func() {
 		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
 
 		subscriber, err := google.NewGoogleSubscriber(client,
-			subscription.Name,
-			google.SubscriberOption{})
+			subscription.Name)
 		Expect(err).NotTo(HaveOccurred())
 
 		msgCh, err := subscriber.Subscribe(ctx)

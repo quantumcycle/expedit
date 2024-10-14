@@ -34,8 +34,7 @@ func createPublisher(client *pubsub.Client, topic publisher.Destination) (*publi
 		return topic, nil
 	}
 	pub, err := google.NewGooglePublisher(client,
-		routingFn,
-		google.PublisherOption{})
+		routingFn)
 	if err != nil {
 		return nil, err
 	}
@@ -59,8 +58,7 @@ func createPublisher(client *pubsub.Client, topic publisher.Destination) (*publi
 
 func createSubscriber(client *pubsub.Client, subscription string, router *subscriber.SubscriptionRouter) (*subscriber.SubscriptionEngine, error) {
 	googleSub, err := google.NewGoogleSubscriber(client,
-		subscription,
-		google.SubscriberOption{})
+		subscription)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +112,7 @@ func main() {
 	err = pubEngine.Publish(msg)
 
 	//***************** Consumer **********************
-	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"), subscriber.SubscriptionRouterOptions{})
+	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
 	router.
 		AddHandler("DummyEvent1").
 		AddMiddleware(google.UnmarshallPayloadFromJson(examples.DummyEvent1{})).

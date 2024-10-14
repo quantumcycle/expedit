@@ -29,17 +29,29 @@ func RouteFromMetadataKey(metadataKey string) RoutingKeyGenerator {
 }
 
 type SubscriptionRouterOptions struct {
-	// AckOnUnknownRoute will ack messages that do not have a route handler defined, if set to true.
-	// This is mutually exclusive with the default route handler. If you have a default route handler, this
-	// option has no effect.
-	AckOnUnknownRoute bool
+	ackOnUnknownRoute bool
 }
 
-func NewRouter(generator RoutingKeyGenerator, opts SubscriptionRouterOptions) *SubscriptionRouter {
+type Option func(*SubscriptionRouterOptions)
+
+// WithAckOnUnknownRoute will ack messages that do not have a route handler defined, if set to true.
+// This is mutually exclusive with the default route handler. If you have a default route handler, this
+// option has no effect.
+func WithAckOnUnknownRoute() Option {
+	return func(opts *SubscriptionRouterOptions) {
+		opts.ackOnUnknownRoute = true
+	}
+}
+
+func NewRouter(generator RoutingKeyGenerator, opts ...Option) *SubscriptionRouter {
+	options := SubscriptionRouterOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
 	return &SubscriptionRouter{
 		generator:    generator,
 		routesByType: map[string]*HandlerBuilder{},
-		opts:         opts,
+		opts:         options,
 	}
 }
 
@@ -71,7 +83,7 @@ func (d *SubscriptionRouter) AddDefaultHandler(handler message.HandlerFunc) {
 		//programming error, adding a default handler twice
 		panic("default handler already set")
 	}
-	if d.opts.AckOnUnknownRoute {
+	if d.opts.ackOnUnknownRoute {
 		//programming error, setting both AckOnUnknownRoute and a default handler
 		panic("cannot set both AckOnUnknownRoute and a default handler")
 	}
@@ -89,7 +101,7 @@ func (d *SubscriptionRouter) HandlerFunc() message.HandlerFunc {
 		if d.defaultRoute != nil {
 			return d.defaultRoute(msg)
 		}
-		if d.opts.AckOnUnknownRoute {
+		if d.opts.ackOnUnknownRoute {
 			return nil
 		}
 		panic(fmt.Sprintf("no handler found for route [%s], and no default route defined.", routeKey))

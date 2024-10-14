@@ -3,7 +3,6 @@ package google
 import (
 	"cloud.google.com/go/pubsub"
 	"context"
-	"encoding/json"
 	"errors"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
@@ -13,30 +12,43 @@ import (
 var DefaultPublishTimeout = 60 * time.Second
 
 type OrderingKeyProvider func(message *message.Message) string
+
 type AttributesProvider func(message *message.Message) map[string]string
 
 func MetadataAsAttributes(msg *message.Message) map[string]string {
 	return msg.Metadata
 }
 
-type PublisherOption struct {
-	// OrderingKeyProvider is a function that returns an ordering key for a given message. If not provided, no ordering key is used.
-	OrderingKeyProvider OrderingKeyProvider
-	// AttributesProvider is a function that returns attributes for a given message. If not provided, no attributes are used.
-	// A provider to set the attribute on the pubsub message.
-	// By default, it's using MetadataAsAttributes which converts all metadata entries as attributes.
-	AttributesProvider AttributesProvider
-	// PublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
-	PublishTimeout time.Duration
+type PublisherOption func(*PublisherOptions)
+
+type PublisherOptions struct {
+	orderingKeyProvider OrderingKeyProvider
+	attributesProvider  AttributesProvider
+	publishTimeout      time.Duration
 }
 
-type PayloadMarshaller func(message *message.Message) ([]byte, error)
-
-func JSONPayloadMarshaller(message *message.Message) ([]byte, error) {
-	return json.Marshal(message.Payload)
+// WithOrderingKeyProvider is a function that returns an ordering key for a given message. If not provided, no ordering key is used.
+func WithOrderingKeyProvider(provider OrderingKeyProvider) PublisherOption {
+	return func(opts *PublisherOptions) {
+		opts.orderingKeyProvider = provider
+	}
 }
 
-type MessageMarshaller func(msg *message.Message) (*pubsub.Message, error)
+// WithAttributesProvider is a function that returns attributes for a given message. If not provided, no attributes are used.
+// A provider to set the attribute on the pubsub message.
+// By default, it's using MetadataAsAttributes which converts all metadata entries as attributes.
+func WithAttributesProvider(provider AttributesProvider) PublisherOption {
+	return func(opts *PublisherOptions) {
+		opts.attributesProvider = provider
+	}
+}
+
+// WithPublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
+func WithPublishTimeout(timeout time.Duration) PublisherOption {
+	return func(opts *PublisherOptions) {
+		opts.publishTimeout = timeout
+	}
+}
 
 type Publisher struct {
 	internalPublisher *publisher.MessagePublisher[*pubsub.Message]
@@ -62,18 +74,20 @@ func (p PubsubTopic) Publish(ctx context.Context, message *pubsub.Message) error
 func NewGooglePublisher(
 	c *pubsub.Client,
 	routingFunc publisher.RoutingFunc,
-	opts PublisherOption) (*Publisher, error) {
+	opts ...PublisherOption) (*Publisher, error) {
 	if c == nil {
 		return nil, errors.New("client is required")
 	}
 	if routingFunc == nil {
 		return nil, errors.New("routing function is required")
 	}
-	if opts.PublishTimeout == 0 {
-		opts.PublishTimeout = DefaultPublishTimeout
+
+	options := PublisherOptions{
+		publishTimeout:     DefaultPublishTimeout,
+		attributesProvider: MetadataAsAttributes,
 	}
-	if opts.AttributesProvider == nil {
-		opts.AttributesProvider = MetadataAsAttributes
+	for _, opt := range opts {
+		opt(&options)
 	}
 
 	internalPublisher := &publisher.MessagePublisher[*pubsub.Message]{
@@ -85,18 +99,18 @@ func NewGooglePublisher(
 			msgImpl := &pubsub.Message{
 				Data: msg.Payload.([]byte),
 			}
-			if opts.OrderingKeyProvider != nil {
-				msgImpl.OrderingKey = opts.OrderingKeyProvider(msg)
+			if options.orderingKeyProvider != nil {
+				msgImpl.OrderingKey = options.orderingKeyProvider(msg)
 			}
-			if opts.AttributesProvider != nil {
-				msgImpl.Attributes = opts.AttributesProvider(msg)
+			if options.attributesProvider != nil {
+				msgImpl.Attributes = options.attributesProvider(msg)
 			}
 			return msgImpl, nil
 		},
-		PublishTimeout: opts.PublishTimeout,
+		PublishTimeout: options.publishTimeout,
 		GetDestinationPublisher: func(dest publisher.Destination) (publisher.MessageImplPublisher[*pubsub.Message], error) {
 			pubTopic := c.Topic(string(dest))
-			if opts.OrderingKeyProvider != nil {
+			if options.orderingKeyProvider != nil {
 				pubTopic.EnableMessageOrdering = true
 			}
 			return PubsubTopic{

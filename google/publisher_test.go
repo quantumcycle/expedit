@@ -38,8 +38,7 @@ var _ = Describe("Google Publisher", Ordered, func() {
 	It("should return an error if the client is missing", func() {
 		_, err := google.NewGooglePublisher(
 			nil,
-			publisher.ConstantDestination(topic.Name),
-			google.PublisherOption{})
+			publisher.ConstantDestination(topic.Name))
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("client is required"))
 	})
@@ -47,8 +46,7 @@ var _ = Describe("Google Publisher", Ordered, func() {
 	It("should return an error if the routing function is missing", func() {
 		_, err := google.NewGooglePublisher(
 			client,
-			nil,
-			google.PublisherOption{})
+			nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("routing function is required"))
 	})
@@ -71,12 +69,10 @@ var _ = Describe("Google Publisher", Ordered, func() {
 		}
 		pub, err := google.NewGooglePublisher(client,
 			routingFn,
-			google.PublisherOption{
-				OrderingKeyProvider: func(msg *message.Message) string {
-					//use the same key for all messages, so they should be received in order
-					return "test-key"
-				},
-			})
+			google.WithOrderingKeyProvider(func(msg *message.Message) string {
+				//use the same key for all messages, so they should be received in order
+				return "test-key"
+			}))
 
 		pubEngine := publisher.NewPublishingEngine(pub)
 		err = pubEngine.Publish(message.NewMessage(context.Background(), "id-1", []byte("msg1")))
@@ -96,11 +92,9 @@ var _ = Describe("Google Publisher", Ordered, func() {
 
 			pub, err := google.NewGooglePublisher(client,
 				publisher.ConstantDestination(topic.Name),
-				google.PublisherOption{
-					AttributesProvider: func(msg *message.Message) map[string]string {
-						return msg.Metadata
-					},
-				})
+				google.WithAttributesProvider(func(msg *message.Message) map[string]string {
+					return msg.Metadata
+				}))
 			pubEngine := publisher.NewPublishingEngine(pub)
 			err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("message1")).WithMetadata("key1", "value1"))
 			Expect(err).NotTo(HaveOccurred())
@@ -118,13 +112,11 @@ var _ = Describe("Google Publisher", Ordered, func() {
 
 			pub, err := google.NewGooglePublisher(client,
 				publisher.ConstantDestination(topic.Name),
-				google.PublisherOption{
-					//Same key for every mesasge, so they should be ALL received in order
-					OrderingKeyProvider: func(msg *message.Message) string {
-						//use the same key for all messages, so they should be received in order
-						return "test-key"
-					},
-				})
+				//Same key for every message, so they should be ALL received in order
+				google.WithOrderingKeyProvider(func(msg *message.Message) string {
+					//use the same key for all messages, so they should be received in order
+					return "test-key"
+				}))
 			pubEngine := publisher.NewPublishingEngine(pub)
 			var sentMsgs []interface{}
 			for i := 0; i < 100; i++ {

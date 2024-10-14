@@ -9,25 +9,50 @@ import (
 	"time"
 )
 
+const DefaultProcessingTimeout = 600 * time.Second
+
 type MessageUnmarshaller func(ctx context.Context, msg *pubsub.Message) (*message.Message, error)
 
-type SubscriberOption struct {
-	// OnUnmarshallingError is a function that is called when an error occurs while unmarshalling a message.
-	// If this option is provided, the callback is responsible for handling the error and optionally calling msg.Nack().
-	// If this option is not provided, the default behaviour is to call msg.Nack().
-	OnUnmarshallingError func(msg *pubsub.Message, err error)
+type SubscriberOption func(*SubscriberOptions)
 
-	// OnProcessingTimeout is a function that is called when a message processing times out.
-	OnProcessingTimeout func(ctx context.Context, msg *pubsub.Message)
+type SubscriberOptions struct {
+	onUnmarshallingError func(msg *pubsub.Message, err error)
+	onProcessingTimeout  func(ctx context.Context, msg *pubsub.Message)
+	processingTimeout    time.Duration
+	receiveSettings      pubsub.ReceiveSettings
+}
 
-	// ProcessingTimeout will dictate how long a message will be processed before it is nacked.
-	// 0 means no timeout, wait forever. Keep in mind that GCP uses the "Acknowledgement deadline" to determine if a
-	// message needs to be redelivered. ProcessingTimeout has no impact on the "Acknowledgement deadline".
-	// Default value is 600 seconds, which is the max value of the GCP "Acknowledgement deadline".
-	ProcessingTimeout time.Duration
+// WithUnmarshallingErrorHandler is a function that is called when an error occurs while unmarshalling a message.
+// If this option is provided, the callback is responsible for handling the error and optionally calling msg.Nack().
+// If this option is not provided, the default behaviour is to call msg.Nack().
+func WithUnmarshallingErrorHandler(handler func(msg *pubsub.Message, err error)) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.onUnmarshallingError = handler
+	}
+}
 
-	// ReceiveSettings is a set of options to pass the underlying gcp pubsub.Subscription
-	ReceiveSettings pubsub.ReceiveSettings
+// WithProcessingTimeoutHandler is a function that is called when a message processing times out.
+func WithProcessingTimeoutHandler(handler func(ctx context.Context, msg *pubsub.Message)) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.onProcessingTimeout = handler
+	}
+}
+
+// WithProcessingTimeout will dictate how long a message will be processed before it is nacked.
+// 0 means no timeout, wait forever. Keep in mind that GCP uses the "Acknowledgement deadline" to determine if a
+// message needs to be redelivered. ProcessingTimeout has no impact on the "Acknowledgement deadline".
+// Default value is 600 seconds, which is the max value of the GCP "Acknowledgement deadline".
+func WithProcessingTimeout(timeout time.Duration) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.processingTimeout = timeout
+	}
+}
+
+// WithReceiveSettings is a set of options to pass the underlying gcp pubsub.Subscription
+func WithReceiveSettings(settings pubsub.ReceiveSettings) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.receiveSettings = settings
+	}
 }
 
 type Subscriber struct {
@@ -37,14 +62,18 @@ type Subscriber struct {
 func NewGoogleSubscriber(
 	c *pubsub.Client,
 	subscription string,
-	opts SubscriberOption) (*Subscriber, error) {
+	opts ...SubscriberOption) (*Subscriber, error) {
 
 	if c == nil {
 		return nil, errors.New("client is required")
 	}
 
-	if opts.ProcessingTimeout <= 0 {
-		opts.ProcessingTimeout = 600 * time.Second
+	options := SubscriberOptions{
+		processingTimeout: DefaultProcessingTimeout,
+	}
+
+	for _, opt := range opts {
+		opt(&options)
 	}
 
 	processor := subscriber.MessageProcessor[*pubsub.Message]{
@@ -59,9 +88,9 @@ func NewGoogleSubscriber(
 			msg.Metadata = pubMsg.Attributes
 			return msg, nil
 		},
-		OnUnmarshallingError: opts.OnUnmarshallingError,
-		ProcessingTimeout:    opts.ProcessingTimeout,
-		OnProcessingTimeout:  opts.OnProcessingTimeout,
+		OnUnmarshallingError: options.onUnmarshallingError,
+		ProcessingTimeout:    options.processingTimeout,
+		OnProcessingTimeout:  options.onProcessingTimeout,
 	}
 	internalSubscriber := subscriber.MessageSubscriber[*pubsub.Message]{
 		InitializeFn: func(ctx context.Context, outputCh chan *message.Message) error {
@@ -69,7 +98,7 @@ func NewGoogleSubscriber(
 			if ok, err := sub.Exists(ctx); !ok || err != nil {
 				return errors.New("subscription does not exist")
 			}
-			sub.ReceiveSettings = opts.ReceiveSettings
+			sub.ReceiveSettings = options.receiveSettings
 			go func() {
 				sub.Receive(ctx,
 					func(ctx context.Context, pubMsg *pubsub.Message) {

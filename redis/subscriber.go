@@ -16,35 +16,73 @@ var StreamDoesntExistErr = errors.New("stream does not exist")
 
 type MessageUnmarshaller func(ctx context.Context, msg *redis.XMessage) (*message.Message, error)
 
-type SubscriberOption struct {
-	// OnUnmarshallingError is a function that is called when an error occurs while unmarshalling a message.
-	// If this option is provided, the callback is responsible for handling the error and optionally calling msg.Nack().
-	// If this option is not provided, the default behaviour is to call msg.Nack().
-	OnUnmarshallingError func(msg MessageWrapper, err error)
+type SubscriberOption func(*SubscriberOptions)
 
-	// OnProcessingTimeout is a function that is called when a message processing times out.
-	OnProcessingTimeout func(ctx context.Context, msg MessageWrapper)
+type SubscriberOptions struct {
+	onUnmarshallingError               func(msg MessageWrapper, err error)
+	onProcessingTimeout                func(ctx context.Context, msg MessageWrapper)
+	consumerGroup                      string
+	consumerGroupCreateStreamIfMissing bool
+	consumerGroupStartID               StartPosition
+	startID                            StartPosition
+	processingTimeout                  time.Duration
+}
 
-	// ConsumerGroup identifies the consumer group to which the subscriber belongs.
-	ConsumerGroup string
+// WithUnmarshallingErrorHandler takes a function that is called when an error occurs while unmarshalling a message.
+// If this option is provided, the callback is responsible for handling the error and optionally calling msg.Nack().
+// If this option is not provided, the default behaviour is to call msg.Nack().
+func WithUnmarshallingErrorHandler(handler func(msg MessageWrapper, err error)) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.onUnmarshallingError = handler
+	}
+}
 
-	// ConsumerGroupCreateStreamIfMissing will create the stream if it does not exist in consumer group mode.
-	ConsumerGroupCreateStreamIfMissing bool
+// WithProcessingTimeoutHandler takes a function that is called when a message processing times out.
+func WithProcessingTimeoutHandler(handler func(ctx context.Context, msg MessageWrapper)) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.onProcessingTimeout = handler
+	}
+}
 
-	// ConsumerGroupStartID is the position the consumer of a consumer group should start from
-	// Using ConsumerGroupStartFromBeginning "0" means the consumer group will consume from the very first message.
-	// Using ConsumerGroupStartFromLatest "$" means the consumer group will consume from the latest message.
-	ConsumerGroupStartID StartPosition
+// WithConsumerGroup identifies the consumer group to which the subscriber belongs.
+func WithConsumerGroup(group string) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.consumerGroup = group
+	}
+}
 
-	// StartID is the ID of the last message that was processed by the subscriber. This is used only when not using
-	// consumer groups. The default is "$" which means the subscriber will start from the latest message.
-	StartID StartPosition
+// WithConsumerGroupCreateStreamIfMissing will create the stream if it does not exist in consumer group mode.
+func WithConsumerGroupCreateStreamIfMissing(create bool) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.consumerGroupCreateStreamIfMissing = create
+	}
+}
 
-	// ProcessingTimeout will dictate how long a message will be processed before it is nacked.
-	// 0 means no timeout, wait forever. Keep in mind that GCP uses the "Acknowledgement deadline" to determine if a
-	// message needs to be redelivered. ProcessingTimeout has no impact on the "Acknowledgement deadline".
-	// Default value is 600 seconds, which is the max value of the GCP "Acknowledgement deadline".
-	ProcessingTimeout time.Duration
+// WithConsumerGroupStartID is the position the consumer of a consumer group should start from
+// Using ConsumerGroupStartFromBeginning "0" means the consumer group will consume from the very first message.
+// Using ConsumerGroupStartFromLatest "$" means the consumer group will consume from the latest message.
+func WithConsumerGroupStartID(startID StartPosition) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.consumerGroupStartID = startID
+	}
+}
+
+// WithStartID is the ID of the last message that was processed by the subscriber. This is used only when not using
+// consumer groups. The default is "$" which means the subscriber will start from the latest message.
+func WithStartID(startID StartPosition) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.startID = startID
+	}
+}
+
+// WithProcessingTimeout will dictate how long a message will be processed before it is nacked.
+// 0 means no timeout, wait forever. Keep in mind that GCP uses the "Acknowledgement deadline" to determine if a
+// message needs to be redelivered. ProcessingTimeout has no impact on the "Acknowledgement deadline".
+// Default value is 600 seconds, which is the max value of the GCP "Acknowledgement deadline".
+func WithProcessingTimeout(timeout time.Duration) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.processingTimeout = timeout
+	}
 }
 
 type Subscriber struct {
@@ -69,22 +107,20 @@ const (
 func NewRedisSubscriber(
 	c *redis.Client,
 	stream string,
-	opts SubscriberOption) (*Subscriber, error) {
+	opts ...SubscriberOption) (*Subscriber, error) {
 
 	if c == nil {
 		return nil, errors.New("client is required")
 	}
 
-	if opts.ProcessingTimeout <= 0 {
-		opts.ProcessingTimeout = 600 * time.Second
+	options := &SubscriberOptions{
+		processingTimeout:    600 * time.Second,
+		consumerGroupStartID: StartFromLatest,
+		startID:              StartFromLatest,
 	}
 
-	if opts.ConsumerGroup != "" && opts.ConsumerGroupStartID == "" {
-		opts.ConsumerGroupStartID = StartFromLatest
-	}
-
-	if opts.ConsumerGroup == "" && opts.StartID == "" {
-		opts.StartID = StartFromLatest
+	for _, opt := range opts {
+		opt(options)
 	}
 
 	processor := subscriber.MessageProcessor[MessageWrapper]{
@@ -97,18 +133,18 @@ func NewRedisSubscriber(
 		MessageUnmarshall: func(ctx context.Context, wrapper MessageWrapper) (*message.Message, error) {
 			return message.NewMessage(ctx, wrapper.msg.ID, wrapper.msg.Values), nil
 		},
-		OnUnmarshallingError: opts.OnUnmarshallingError,
-		ProcessingTimeout:    opts.ProcessingTimeout,
-		OnProcessingTimeout:  opts.OnProcessingTimeout,
+		OnUnmarshallingError: options.onUnmarshallingError,
+		ProcessingTimeout:    options.processingTimeout,
+		OnProcessingTimeout:  options.onProcessingTimeout,
 	}
 	internalSubscriber := subscriber.MessageSubscriber[*pubsub.Message]{
 		InitializeFn: func(ctx context.Context, outputCh chan *message.Message) error {
-			if opts.ConsumerGroup != "" {
+			if options.consumerGroup != "" {
 				var err error
-				if opts.ConsumerGroupCreateStreamIfMissing {
-					err = c.XGroupCreateMkStream(ctx, stream, opts.ConsumerGroup, string(opts.ConsumerGroupStartID)).Err()
+				if options.consumerGroupCreateStreamIfMissing {
+					err = c.XGroupCreateMkStream(ctx, stream, options.consumerGroup, string(options.consumerGroupStartID)).Err()
 				} else {
-					err = c.XGroupCreate(ctx, stream, opts.ConsumerGroup, string(opts.ConsumerGroupStartID)).Err()
+					err = c.XGroupCreate(ctx, stream, options.consumerGroup, string(options.consumerGroupStartID)).Err()
 				}
 				if err != nil {
 					if strings.Contains(err.Error(), "The XGROUP subcommand requires the key to exist") {
@@ -123,14 +159,14 @@ func NewRedisSubscriber(
 
 			uniqueID := shortuuid.New()
 			go func() {
-				startID := string(opts.StartID)
+				startID := string(options.startID)
 				for {
 					var err error
 					var entries []redis.XStream
 
-					if opts.ConsumerGroup != "" {
+					if options.consumerGroup != "" {
 						entries, err = c.XReadGroup(ctx, &redis.XReadGroupArgs{
-							Group:    opts.ConsumerGroup,
+							Group:    options.consumerGroup,
 							Consumer: uniqueID,
 							Streams:  []string{stream, ">"},
 							Count:    1,
@@ -154,7 +190,7 @@ func NewRedisSubscriber(
 					for _, msg := range msgs {
 						processor.ProcessMessage(ctx, MessageWrapper{
 							stream:        stream,
-							consumerGroup: opts.ConsumerGroup,
+							consumerGroup: options.consumerGroup,
 							msg:           &msg,
 						}, outputCh)
 						startID = msg.ID

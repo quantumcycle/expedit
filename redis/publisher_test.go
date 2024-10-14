@@ -51,8 +51,7 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 	It("should return an error if the client is missing", func() {
 		_, err := rpub.NewRedisPublisher(nil,
 			publisher.ConstantDestination(testStream),
-			SimpleMarshaller,
-			rpub.PublisherOption{})
+			SimpleMarshaller)
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("client is required"))
 	})
@@ -60,8 +59,7 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 	It("should return an error if the routing function is missing", func() {
 		_, err := rpub.NewRedisPublisher(client,
 			nil,
-			SimpleMarshaller,
-			rpub.PublisherOption{})
+			SimpleMarshaller)
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("routing function is required"))
 	})
@@ -69,8 +67,7 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 	It("should return an error if the marshaller is missing", func() {
 		_, err := rpub.NewRedisPublisher(client,
 			publisher.ConstantDestination(testStream),
-			nil,
-			rpub.PublisherOption{})
+			nil)
 		Expect(err).To(HaveOccurred())
 		Expect(err).To(MatchError("marshaller is required"))
 	})
@@ -87,8 +84,7 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 		}
 		pub, err := rpub.NewRedisPublisher(client,
 			routingFn,
-			SimpleMarshaller,
-			rpub.PublisherOption{})
+			SimpleMarshaller)
 
 		pubEngine := publisher.NewPublishingEngine(pub)
 		err = pubEngine.Publish(message.NewMessage(context.Background(), "id-1", map[string]interface{}{
@@ -109,8 +105,7 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 		routingFn := publisher.ConstantDestination(stream)
 		pub, err := rpub.NewRedisPublisher(client,
 			routingFn,
-			SimpleMarshaller,
-			rpub.PublisherOption{})
+			SimpleMarshaller)
 
 		pubEngine := publisher.NewPublishingEngine(pub)
 		expectedMessages := 10
