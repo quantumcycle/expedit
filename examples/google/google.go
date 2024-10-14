@@ -86,8 +86,6 @@ func AddStructNameToMetadata() middleware.Middleware {
 }
 
 func main() {
-	//****************** Producer **********************
-
 	os.Setenv("PUBSUB_EMULATOR_HOST", "localhost:29085")
 	var err error
 	var client *pubsub.Client
@@ -98,6 +96,8 @@ func main() {
 	emuClient = emulator.NewTestClient(ctx, "test-project")
 	topic = emuClient.CreateTestTopic(ctx, "test-topic")
 	subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+
+	//****************** Producer **********************
 
 	client, err = pubsub.NewClient(ctx, "test-project")
 	if err != nil {
@@ -110,6 +110,9 @@ func main() {
 	}
 	msg := message.NewMessage(ctx, "id-1", examples.DummyEvent1{Prop1: "value1"})
 	err = pubEngine.Publish(msg)
+	if err != nil {
+		panic(err)
+	}
 
 	//***************** Consumer **********************
 	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
@@ -119,9 +122,9 @@ func main() {
 		Handle(message.HandleWithPayload(func(msg *message.Message, dummyEvent1 examples.DummyEvent1) error {
 			sec := rand.Intn(5) + 2
 			start := time.Now()
-			fmt.Println("Sleeping for", sec, "seconds")
+			fmt.Println("Dummy event handler 1: Sleeping for", sec, "seconds")
 			time.Sleep(time.Duration(sec) * time.Second)
-			fmt.Printf("Dummy event handler 1 handler received message %s with prop1=[%s] at %s finished at %s\n",
+			fmt.Printf("Dummy event handler 1: handler received message %s with prop1=[%s] at %s finished at %s\n",
 				msg.ID, dummyEvent1.Prop1, start.Format(time.StampMilli), time.Now().Format(time.StampMilli))
 			return nil
 		}))
@@ -129,6 +132,7 @@ func main() {
 	router.AddDefaultHandler(func(msg *message.Message) error {
 		sec := rand.Intn(5) + 2
 		start := time.Now()
+		fmt.Println("Default handler: Sleeping for", sec, "seconds")
 		time.Sleep(time.Duration(sec) * time.Second)
 		fmt.Printf("Default handler received message %s at %s finished at %s\n",
 			msg.ID, start.Format(time.StampMilli), time.Now().Format(time.StampMilli))

@@ -15,10 +15,11 @@ type PublisherOption func(*PublisherOptions)
 
 // PublisherOptions holds configuration options for a Publisher.
 type PublisherOptions struct {
-	idGenerator    IDGenerator
-	maxlen         int64
-	approx         bool
-	publishTimeout time.Duration
+	idGenerator        IDGenerator
+	maxlen             int64
+	approx             bool
+	publishTimeout     time.Duration
+	metadataMarshaller XAddValuesMarshaller
 }
 
 // WithIDGenerator is a function that returns an ID for a given message to be send to redis. If not provided, redis will generate the ID.
@@ -50,8 +51,17 @@ func WithPublishTimeout(timeout time.Duration) PublisherOption {
 	}
 }
 
+// WithMetadataMarshaller is a function that returns a map of values representing the metadata part of the message
+// to be send to redis. If not provided, the metadata string map of the message is used as is. This is useful if you
+// want to process the metadata, for example, to add a prefix to all keys.
+func WithMetadataMarshaller(marshaller XAddValuesMarshaller) PublisherOption {
+	return func(opts *PublisherOptions) {
+		opts.metadataMarshaller = marshaller
+	}
+}
+
 type IDGenerator func(msg *message.Message) (string, error)
-type MessageMarshaller func(msg *message.Message) (map[string]interface{}, error)
+type XAddValuesMarshaller func(msg *message.Message) map[string]interface{}
 
 type Publisher struct {
 	internalPublisher *publisher.MessagePublisher[*redis.XAddArgs]
@@ -76,7 +86,7 @@ func (s Stream) Publish(ctx context.Context, message *redis.XAddArgs) error {
 func NewRedisPublisher(
 	c *redis.Client,
 	routingFunc publisher.RoutingFunc,
-	marshaller MessageMarshaller,
+	payloadMarshaller XAddValuesMarshaller,
 	opts ...PublisherOption) (*Publisher, error) {
 	if c == nil {
 		return nil, errors.New("client is required")
@@ -84,8 +94,8 @@ func NewRedisPublisher(
 	if routingFunc == nil {
 		return nil, errors.New("routing function is required")
 	}
-	if marshaller == nil {
-		return nil, errors.New("marshaller is required")
+	if payloadMarshaller == nil {
+		return nil, errors.New("payloadMarshaller is required")
 	}
 
 	options := PublisherOptions{
@@ -99,12 +109,27 @@ func NewRedisPublisher(
 	internalPublisher := &publisher.MessagePublisher[*redis.XAddArgs]{
 		RoutingFunc: routingFunc,
 		MessageMarshaller: func(msg *message.Message) (*redis.XAddArgs, error) {
-			values, err := marshaller(msg)
-			if err != nil {
-				return nil, err
+			values := make(map[string]interface{})
+
+			if options.metadataMarshaller != nil {
+				metadataValues := options.metadataMarshaller(msg)
+				for k, v := range metadataValues {
+					values[k] = v
+				}
+			} else {
+				for k, v := range msg.Metadata {
+					values[k] = v
+				}
 			}
+
+			payloadValues := payloadMarshaller(msg)
+			for k, v := range payloadValues {
+				values[k] = v
+			}
+
 			var id = ""
 			if options.idGenerator != nil {
+				var err error
 				id, err = options.idGenerator(msg)
 				if err != nil {
 					return nil, err

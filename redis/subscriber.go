@@ -26,6 +26,8 @@ type SubscriberOptions struct {
 	consumerGroupStartID               StartPosition
 	startID                            StartPosition
 	processingTimeout                  time.Duration
+	metadataExtractor                  func(wrapper MessageWrapper) map[string]string
+	payloadExtractor                   func(wrapper MessageWrapper) map[string]interface{}
 }
 
 // WithUnmarshallingErrorHandler takes a function that is called when an error occurs while unmarshalling a message.
@@ -85,6 +87,23 @@ func WithProcessingTimeout(timeout time.Duration) SubscriberOption {
 	}
 }
 
+// WithMetadataExtractor is a function that extracts metadata from a redis message.
+// If not provided, no metadata will be extracted. The extractor usually needs to be aligned with the
+// marshaller used by the publisher.
+func WithMetadataExtractor(extractor func(wrapper MessageWrapper) map[string]string) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.metadataExtractor = extractor
+	}
+}
+
+// WithPayloadExtractor is a function that extracts payload from a redis message.
+// If not provided, all the values in the redis message are converted into a map as payload.
+func WithPayloadExtractor(extractor func(wrapper MessageWrapper) map[string]interface{}) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.payloadExtractor = extractor
+	}
+}
+
 type Subscriber struct {
 	internalSubscriber *subscriber.MessageSubscriber[*pubsub.Message]
 }
@@ -131,7 +150,19 @@ func NewRedisSubscriber(
 			//TODO: see the XCLAIM comment above
 		},
 		MessageUnmarshall: func(ctx context.Context, wrapper MessageWrapper) (*message.Message, error) {
-			return message.NewMessage(ctx, wrapper.msg.ID, wrapper.msg.Values), nil
+			metadata := map[string]string{}
+			if options.metadataExtractor != nil {
+				metadata = options.metadataExtractor(wrapper)
+			}
+			payload := map[string]interface{}{}
+			if options.payloadExtractor != nil {
+				payload = options.payloadExtractor(wrapper)
+			} else {
+				payload = wrapper.msg.Values
+			}
+			msg := message.NewMessage(ctx, wrapper.msg.ID, payload)
+			msg.Metadata = metadata
+			return msg, nil
 		},
 		OnUnmarshallingError: options.onUnmarshallingError,
 		ProcessingTimeout:    options.processingTimeout,
