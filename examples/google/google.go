@@ -114,7 +114,7 @@ func main() {
 	err = pubEngine.Publish(msg)
 
 	//***************** Consumer **********************
-	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
+	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"), subscriber.SubscriptionRouterOptions{})
 	router.
 		AddHandler("DummyEvent1").
 		AddMiddleware(google.UnmarshallPayloadFromJson(examples.DummyEvent1{})).

@@ -2,7 +2,7 @@ package subscriber
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/message/middleware"
 )
@@ -15,6 +15,7 @@ type SubscriptionRouter struct {
 	generator    RoutingKeyGenerator
 	routesByType map[string]*HandlerBuilder
 	defaultRoute message.HandlerFunc
+	opts         SubscriptionRouterOptions
 }
 
 type RoutingKey string
@@ -27,10 +28,18 @@ func RouteFromMetadataKey(metadataKey string) RoutingKeyGenerator {
 	}
 }
 
-func NewRouter(generator RoutingKeyGenerator) *SubscriptionRouter {
+type SubscriptionRouterOptions struct {
+	// AckOnUnknownRoute will ack messages that do not have a route handler defined, if set to true.
+	// This is mutually exclusive with the default route handler. If you have a default route handler, this
+	// option has no effect.
+	AckOnUnknownRoute bool
+}
+
+func NewRouter(generator RoutingKeyGenerator, opts SubscriptionRouterOptions) *SubscriptionRouter {
 	return &SubscriptionRouter{
 		generator:    generator,
 		routesByType: map[string]*HandlerBuilder{},
+		opts:         opts,
 	}
 }
 
@@ -62,13 +71,17 @@ func (d *SubscriptionRouter) AddDefaultHandler(handler message.HandlerFunc) {
 		//programming error, adding a default handler twice
 		panic("default handler already set")
 	}
+	if d.opts.AckOnUnknownRoute {
+		//programming error, setting both AckOnUnknownRoute and a default handler
+		panic("cannot set both AckOnUnknownRoute and a default handler")
+	}
 	d.defaultRoute = handler
 }
 
 func (d *SubscriptionRouter) HandlerFunc() message.HandlerFunc {
 	return func(msg *message.Message) error {
-		dispatchType := d.generator(msg)
-		handlerBuilder := d.routesByType[string(dispatchType)]
+		routeKey := d.generator(msg)
+		handlerBuilder := d.routesByType[string(routeKey)]
 		if handlerBuilder != nil && handlerBuilder.handler != nil {
 			handlerFn := handlerBuilder.mc.Wrap(handlerBuilder.handler)
 			return handlerFn(msg)
@@ -76,17 +89,9 @@ func (d *SubscriptionRouter) HandlerFunc() message.HandlerFunc {
 		if d.defaultRoute != nil {
 			return d.defaultRoute(msg)
 		}
-		panic("no handler found for dispatch type")
-	}
-}
-
-func NewTypedMessageHandler[T any](handler func(ctx context.Context, msgID string, metadata map[string]string, event T) error) message.HandlerFunc {
-	handlerFn := func(msg *message.Message) error {
-		pl := msg.Payload
-		if typed, ok := pl.(T); ok {
-			return handler(msg.Context(), msg.ID, msg.Metadata, typed)
+		if d.opts.AckOnUnknownRoute {
+			return nil
 		}
-		return errors.New("payload type does not match handler type")
+		panic(fmt.Sprintf("no handler found for route [%s], and no default route defined.", routeKey))
 	}
-	return handlerFn
 }
