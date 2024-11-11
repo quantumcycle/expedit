@@ -144,7 +144,13 @@ func NewRedisSubscriber(
 
 	processor := subscriber.MessageProcessor[MessageWrapper]{
 		Ack: func(ctx context.Context, wrapper MessageWrapper) {
-			c.XAck(ctx, wrapper.stream, wrapper.consumerGroup, wrapper.msg.ID)
+			//TODO: Xack seems to be only useful for consumer groups, should we add a IF to only apply on consumer groups?
+			_, err := c.XAck(ctx, wrapper.stream, wrapper.consumerGroup, wrapper.msg.ID).Result()
+			if err != nil {
+				//TODO, handle this error instead of panicking
+				//Retry a couple of time? If it doesn't work, it will be redelivered
+				panic(err)
+			}
 		},
 		Nack: func(ctx context.Context, wrapper MessageWrapper) {
 			//TODO: see the XCLAIM comment above

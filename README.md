@@ -25,12 +25,15 @@ Check the code in the [example](example/main.go) folder for a working example.
 
 ## Supported implementations
 
-| Impl              |  Status  | Notes                            |
-|-------------------|:--------:|----------------------------------|
-| Golang channel    |   Beta   | Publisher and subscriber written |
-| Google GCP Pubsub |   Beta   | Publisher and subscriber written |
-| Redis stream      |  Alpha   | Some corner cases to address     |
-| Kafka             | Planned  |                                  |
+| Impl              |  Status  | Notes                                     |
+|-------------------|:--------:|-------------------------------------------|
+| Golang channel    |   Beta   | Publisher and subscriber written          |
+| Google GCP Pubsub |   Beta   | Publisher and subscriber written          |
+| Redis stream      |  Alpha   | Some corner cases to address, like XCLAIM |
+| Kafka             | Planned  |                                           |
+| Amazon SNS        | Planned  |                                           |
+| Amazon SQS        | Planned  |                                           |
+| Rabbit MQ         | Planned  |                                           |
 
 ## Definitions
 

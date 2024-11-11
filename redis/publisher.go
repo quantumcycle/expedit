@@ -127,6 +127,7 @@ func NewRedisPublisher(
 				values[k] = v
 			}
 
+			//redis will use * to generate an ID when id is empty string
 			var id = ""
 			if options.idGenerator != nil {
 				var err error

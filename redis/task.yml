@@ -2,11 +2,13 @@ version: '3'
 
 tasks:
   dependencies-up:
+    aliases: [du]
     desc: Start docker compose dependencies
     cmds:
       - docker compose -f ./docker-compose.yml up -d
 
   dependencies-down:
+    aliases: [dd]
     desc: Start docker compose dependencies
     cmds:
       - docker compose -f ./docker-compose.yml down
