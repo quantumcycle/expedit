@@ -23,7 +23,7 @@ func ExpectNbMessages(client *redis.Client, stream string, nb int64, timeout tim
 	}, timeout).Should(Equal(nb))
 }
 
-func SimpleMarshaller(msg *message.Message) (map[string]interface{}, error) {
+func SimpleMarshaller(msg *message.Message) map[string]interface{} {
 	values := make(map[string]interface{})
 	for k, v := range msg.Metadata {
 		values[k] = v
@@ -32,7 +32,7 @@ func SimpleMarshaller(msg *message.Message) (map[string]interface{}, error) {
 		for k, v := range payloadMap {
 			values[k] = v
 		}
-		return values, nil
+		return values
 	}
 	panic("payload must be map[string]interface{}")
 }
@@ -69,7 +69,7 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 			publisher.ConstantDestination(testStream),
 			nil)
 		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("marshaller is required"))
+		Expect(err).To(MatchError("payloadMarshaller is required"))
 	})
 
 	It("should use the routing function to determine the target stream", func() {

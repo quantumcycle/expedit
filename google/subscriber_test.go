@@ -3,7 +3,6 @@ package google_test
 import (
 	"cloud.google.com/go/pubsub"
 	"context"
-	"fmt"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/core/message"
@@ -80,7 +79,7 @@ var _ = Describe("Google Subscriber", func() {
 
 		expectedMsgCount := 10
 		for i := 0; i < expectedMsgCount; i++ {
-			topic.PublishBytes(ctx, fmt.Sprintf("id-%d", i+1), []byte("payload"), nil)
+			topic.PublishBytes(ctx, []byte("payload"), nil)
 		}
 		Eventually(func() int {
 			return msgCount
@@ -94,31 +93,89 @@ var _ = Describe("Google Subscriber", func() {
 		defer cancel()
 		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-		timeoutOccured := false
+		timeoutOccurred := false
 		subscriber, err := google.NewGoogleSubscriber(client,
 			subscription.Name,
 			google.WithProcessingTimeout(1*time.Second),
 			google.WithProcessingTimeoutHandler(func(ctx context.Context, msg *pubsub.Message) {
-				timeoutOccured = true
+				timeoutOccurred = true
 			}))
 		Expect(err).NotTo(HaveOccurred())
 
-		_, err = subscriber.Subscribe(ctx)
+		nackOccurred := false
+		msgCh, err := subscriber.Subscribe(ctx)
+		defer subscriber.Close()
+		Expect(err).NotTo(HaveOccurred())
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case msg := <-msgCh:
+					if msg == nil {
+						return
+					}
+					nextState := <-msg.StateChange()
+					if nextState == message.Nack {
+						nackOccurred = true
+					}
+				}
+			}
+		}()
+
+		topic.PublishBytes(ctx, []byte("payload"), nil)
+
+		Eventually(func() bool {
+			return timeoutOccurred && nackOccurred
+		}, 5*time.Second).Should(Equal(true))
+	})
+
+	It("should receive the message ids that were published", func() {
+		//We cannot query the emulator to see if the message was nacked, so the next best thing is to check if the
+		//event handler was called.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+
+		subscriber, err := google.NewGoogleSubscriber(client,
+			subscription.Name)
+		Expect(err).NotTo(HaveOccurred())
+
+		msgCh, err := subscriber.Subscribe(ctx)
 		defer subscriber.Close()
 		Expect(err).NotTo(HaveOccurred())
 
-		topic.PublishBytes(ctx, "id-1", []byte("payload"), nil)
+		idReceived := make(map[string]bool)
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case msg := <-msgCh:
+					if msg == nil {
+						return
+					}
+					idReceived[msg.ID] = true
+				}
+			}
+		}()
 
-		//We're not pulling messages from the channel, so the message will timeout and be nacked.
-		Eventually(func() bool {
-			return timeoutOccured
-		}, 2*time.Second).Should(Equal(true))
+		expectedIds := make([]string, 0, 10)
+		for i := 0; i < 10; i++ {
+			id := topic.PublishBytes(ctx, []byte("payload"), nil)
+			expectedIds = append(expectedIds, id)
+		}
+
+		Eventually(func() []string {
+			keys := make([]string, 0, len(idReceived))
+			for k := range idReceived {
+				keys = append(keys, k)
+			}
+			return keys
+		}, 5*time.Second).Should(ContainElements(expectedIds))
 	})
 
 	It("should relay the ack or nack to gcp messages", func() {
-		//We're indirectly testing the ack/nack functionality by checking if the message is removed from the subscription
-		//We're sending 2 messages, and the first one is nacked the first time. GCP is gonna redeliver the message, and
-		//we're gonna end up with 3 messages total. The second message is just acked, so it's not redelivered.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
@@ -128,6 +185,8 @@ var _ = Describe("Google Subscriber", func() {
 		defer subscriber.Close()
 		Expect(err).NotTo(HaveOccurred())
 
+		//We're sending 100 messages
+		//All messages will be acked, except the first one, which will be nacked and retried
 		nackDone := false
 		processCount := 0
 		msgCh, err := subscriber.Subscribe(ctx)
@@ -152,12 +211,14 @@ var _ = Describe("Google Subscriber", func() {
 			}
 		}()
 
-		topic.PublishBytes(ctx, "id-1", []byte("payload1"), nil)
-		topic.PublishBytes(ctx, "id-2", []byte("payload2"), nil)
+		nbMsg := 100
+		for i := 0; i < nbMsg; i++ {
+			topic.PublishBytes(ctx, []byte("payload1"), nil)
+		}
 
 		Eventually(func() int {
 			return processCount
-		}, 5*time.Second).Should(Equal(3))
+		}, 5*time.Second).Should(Equal(nbMsg + 1))
 	})
 
 	It("should cancel message context once the processing is done", func() {
@@ -173,7 +234,7 @@ var _ = Describe("Google Subscriber", func() {
 		Expect(err).NotTo(HaveOccurred())
 		defer subscriber.Close()
 
-		topic.PublishBytes(ctx, "id-1", []byte("payload"), nil)
+		topic.PublishBytes(ctx, []byte("payload"), nil)
 
 		processCount := 0
 		waitCh := make(chan bool)

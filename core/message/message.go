@@ -25,17 +25,16 @@ type Message struct {
 	ctx       context.Context
 	mutex     sync.Mutex
 	state     State
-	stateChan chan State
+	stateChan []chan State
 }
 
 func NewMessage(ctx context.Context, id string, payload Payload) *Message {
 	return &Message{
-		ID:        id,
-		Metadata:  make(map[string]string),
-		Payload:   payload,
-		ctx:       ctx,
-		state:     Processing,
-		stateChan: make(chan State, 1),
+		ID:       id,
+		Metadata: make(map[string]string),
+		Payload:  payload,
+		ctx:      ctx,
+		state:    Processing,
 	}
 }
 
@@ -57,7 +56,9 @@ func (m *Message) Ack() bool {
 	}
 
 	m.state = Ack
-	m.stateChan <- Ack
+	for _, ch := range m.stateChan {
+		ch <- Ack
+	}
 	return true
 }
 
@@ -74,12 +75,18 @@ func (m *Message) Nack() bool {
 	}
 
 	m.state = Nack
-	m.stateChan <- Nack
+	for _, ch := range m.stateChan {
+		ch <- Nack
+	}
 	return true
 }
 
 func (m *Message) StateChange() <-chan State {
-	return m.stateChan
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	ch := make(chan State, 1)
+	m.stateChan = append(m.stateChan, ch)
+	return ch
 }
 
 func (m *Message) State() State {
@@ -115,4 +122,13 @@ func (m *Message) Equals(toCompare *Message) bool {
 		}
 	}
 	return reflect.DeepEqual(m.Payload, toCompare.Payload)
+}
+
+func (m *Message) Destroy() {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	for _, ch := range m.stateChan {
+		close(ch)
+	}
+	m.stateChan = nil
 }

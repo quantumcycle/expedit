@@ -44,25 +44,51 @@ func (p MessageProcessor[T]) ProcessMessage(ctx context.Context, msgImpl T, outp
 		return
 	}
 
-	go func() {
-		ctxProcessingTimeout, cancel := context.WithTimeout(ctx, p.ProcessingTimeout)
-		defer cancel()
+	var stateChSubscribeDone sync.WaitGroup
 
-		select {
-		case <-ctxProcessingTimeout.Done():
-			if p.OnProcessingTimeout != nil {
-				p.OnProcessingTimeout(withCancelCtx, msgImpl)
+	//Goroutine to nack message after processing timeout
+	if p.ProcessingTimeout > 0 {
+		stateChSubscribeDone.Add(1)
+		go func() {
+			ctxProcessingTimeout, cancel := context.WithTimeout(ctx, p.ProcessingTimeout)
+			defer cancel()
+
+			stateCh := msg.StateChange()
+			stateChSubscribeDone.Done()
+
+			select {
+			case <-stateCh:
+				//in case of state change, we just return. it means the message was ack or nack and we don't need to
+				//track the timeout anymore
+				return
+			case <-ctxProcessingTimeout.Done():
+				if p.OnProcessingTimeout != nil {
+					p.OnProcessingTimeout(withCancelCtx, msgImpl)
+				}
+				//It's fine to Nack in all cases, because if the message is already acknowledged, the Nack will be ignored
+				msg.Nack()
 			}
-			p.Nack(withCancelCtx, msgImpl)
-		case state := <-msg.StateChange():
+		}()
+	}
+
+	//Goroutine to call the underlying Ack/Nack functions based on status changed
+	stateChSubscribeDone.Add(1)
+	go func() {
+		stateCh := msg.StateChange()
+		stateChSubscribeDone.Done()
+		select {
+		case state := <-stateCh:
 			if state == message.Ack {
 				p.Ack(withCancelCtx, msgImpl)
-			} else {
+			} else if state == message.Nack {
 				p.Nack(withCancelCtx, msgImpl)
 			}
 		}
 		msgCtxCancel()
+		msg.Destroy()
 	}()
+
+	stateChSubscribeDone.Wait()
 	safeSendToChannel(outputCh, msg)
 }
 

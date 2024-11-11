@@ -85,16 +85,17 @@ func (tt TestTopic) CreateTestSubscription(ctx context.Context, identifier strin
 	}
 }
 
-func (tt TestTopic) PublishBytes(ctx context.Context, ID string, bytes []byte, attrs map[string]string) {
+func (tt TestTopic) PublishBytes(ctx context.Context, bytes []byte, attrs map[string]string) string {
 	topic := tt.client.Topic(string(tt.Name))
 	r := topic.Publish(ctx, &pubsub.Message{
-		ID:         ID,
 		Attributes: attrs,
 		Data:       bytes,
 	})
-	if _, err := r.Get(ctx); err != nil {
+	id, err := r.Get(ctx)
+	if err != nil {
 		panic(err)
 	}
+	return id
 }
 
 func (ts TestSubscription) Delete(ctx context.Context) {
