@@ -10,9 +10,11 @@ import (
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/quantumcycle/expedit/core/subscriber"
 	examples "github.com/quantumcycle/expedit/example"
+	exmw "github.com/quantumcycle/expedit/example/middleware"
 	"github.com/quantumcycle/expedit/google"
 	"github.com/quantumcycle/expedit/google/emulator"
 	promware "github.com/quantumcycle/expedit/prometheus/middleware"
+	"github.com/sony/gobreaker/v2"
 	"math/rand"
 	"os"
 	"reflect"
@@ -66,7 +68,9 @@ func createSubscriber(client *pubsub.Client, subscription string, router *subscr
 	subscriberLabelsProducer := func(msg *message.Message, err error) prometheus.Labels {
 		return prometheus.Labels{"subscriber": "my_subscriber", "error": strconv.FormatBool(err != nil)}
 	}
+	testBreaker := gobreaker.NewCircuitBreaker[*message.Message](gobreaker.Settings{})
 	subEngine.
+		AddMiddleware(exmw.CircuitBreaker(testBreaker)).
 		AddMiddleware(promware.PrometheusMetricsCountVec(examples.CreatePromIncomingCount([]string{"subscriber", "error"}), subscriberLabelsProducer)).
 		AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromIncomingDuration([]string{"subscriber", "error"}), subscriberLabelsProducer)).
 		AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {

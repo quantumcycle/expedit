@@ -60,15 +60,28 @@ message processing via Prometheus, or even catch errors, panic, and retry the me
 underlying implementation doesn't support it.
 
 Here is a list of the provided middlewares, but of course, you can build your own.
-* PanicRecovered
-* OnError
-* ContextTimeout
-* Throttle
-* PrometheusMetricsCount
-* PrometheusMetricsCountVec
-* PrometheusMetricsDuration
-* PrometheusMetricsDurationVec
-* CorrelationIDFromContext
+* ContextKeyToMetadata: Add some value from the context to the message metadata. Useful to record a correlation id, for example
+* ConvertPanicToError: Recover any panic into an error
+* OnError: Do something when an error occurs
+* ContextTimeout: Add a timeout to the context
+* Throttle: Throttle the message processing
+* ConditionalExecute: Execute a function on the message based on a condition. This is useful to create poison queues for example.
+* ConditionalSkip: Skip the message processing based on a condition. This is useful to achieve deduplication with something like Redis for example
+* PrometheusMetricsCount: Increment a prometheus counter
+* PrometheusMetricsCountVec: Increment a prometheus counter with labels
+* PrometheusMetricsDuration: Observe the duration of the message processing
+* PrometheusMetricsDurationVec: Observe the duration of the message processing with labels
+
+You can add middlewares on SubscriptionEngine, or PublishingEngine like so
+```golang
+    subEngine := subscriber.NewSubscriptionEngine(mySub, *router)
+	subEngine.
+		AddMiddleware(middleware.ContextKeyToMetadata("correlation_id")).
+		AddMiddleware(middleware.OnError(func(msg *message.Message, err error) {
+			fmt.Printf("Error in handler for message %s [%s]: %s\n", msg.ID, msg.Metadata, err.Error())
+		})).
+
+```
 
 ### Publishing
 
@@ -169,11 +182,11 @@ Then, you have some methods on the message itself. The most important ones are `
 I created this library after trying to use [Watermill](https://watermill.io/) in a work project. I found Watermill to be a great library,
 but it's designed for more complex use cases where intricate routing is required between multiple Publishers and Subscribers. 
 My use cases were a bit simpler, but still, I liked some of the concepts in Watermill, like the use of middleware and the 
-ability to integrate with multiple message brokers. So I decided to create this library to provide a simpler interface for 
-interacting with message brokers.
+ability to integrate with multiple message brokers. So I decided to create this library to provide a simpler and lower level 
+interface for message brokers.
 
 Also, Expedit takes the opposite approach to Watermill when it comes to abstractions. Watermill tries to abstract all implementation
-to a single interface. Expedit has a very simplement interface, but you keep the ability to use the underlying implementation features 
+to a single interface. Expedit has a very simple interface, but you keep the ability to use the underlying implementation features 
 and particularities. One example of this is that with GCP PubSub, if you want to subscribe to messages, you don't actually have
 to know from which topic the messages are coming from. With Watermill, the library has that Topic/Subscription abstraction baked
 in the abstraction, so even though you don't need to know the topic, you still need to provide it when creating the subscriber. With

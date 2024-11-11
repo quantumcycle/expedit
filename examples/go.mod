@@ -16,6 +16,7 @@ require (
 	github.com/prometheus/common v0.44.0 // indirect
 	github.com/prometheus/procfs v0.11.1 // indirect
 	github.com/quantumcycle/expedit/core v0.0.0-20231105182610-67cd4c7c3f88 // indirect
+	github.com/sony/gobreaker/v2 v2.0.0 // indirect
 	golang.org/x/sys v0.12.0 // indirect
 	google.golang.org/protobuf v1.31.0 // indirect
 )
