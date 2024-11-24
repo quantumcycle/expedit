@@ -3,6 +3,7 @@ package subscriber
 import (
 	"context"
 	"fmt"
+	"github.com/quantumcycle/expedit/core/log"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/message/middleware"
 )
@@ -30,6 +31,7 @@ func RouteFromMetadataKey(metadataKey string) RoutingKeyGenerator {
 
 type SubscriptionRouterOptions struct {
 	ackOnUnknownRoute bool
+	logger            log.Logger
 }
 
 type Option func(*SubscriptionRouterOptions)
@@ -40,6 +42,13 @@ type Option func(*SubscriptionRouterOptions)
 func WithAckOnUnknownRoute() Option {
 	return func(opts *SubscriptionRouterOptions) {
 		opts.ackOnUnknownRoute = true
+	}
+}
+
+// WithLogger sets the logger for the subscription router.
+func WithLogger(l log.Logger) Option {
+	return func(opts *SubscriptionRouterOptions) {
+		opts.logger = l
 	}
 }
 
@@ -95,13 +104,22 @@ func (d *SubscriptionRouter) HandlerFunc() message.HandlerFunc {
 		routeKey := d.generator(msg)
 		handlerBuilder := d.routesByType[string(routeKey)]
 		if handlerBuilder != nil && handlerBuilder.handler != nil {
+			if d.opts.logger != nil {
+				d.opts.logger.Infof(msg.Context(), "router handling message %s with route [%s]", msg.ID, routeKey)
+			}
 			handlerFn := handlerBuilder.mc.Wrap(handlerBuilder.handler)
 			return handlerFn(msg)
 		}
 		if d.defaultRoute != nil {
+			if d.opts.logger != nil {
+				d.opts.logger.Infof(msg.Context(), "router handling message %s with default route", msg.ID)
+			}
 			return d.defaultRoute(msg)
 		}
 		if d.opts.ackOnUnknownRoute {
+			if d.opts.logger != nil {
+				d.opts.logger.Infof(msg.Context(), "router acked unknown message %s. route was %s", msg.ID, routeKey)
+			}
 			return nil
 		}
 		panic(fmt.Sprintf("no handler found for route [%s], and no default route defined.", routeKey))

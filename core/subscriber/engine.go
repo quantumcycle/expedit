@@ -2,6 +2,7 @@ package subscriber
 
 import (
 	"context"
+	"github.com/quantumcycle/expedit/core/log"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/message/middleware"
 	"sync"
@@ -9,6 +10,7 @@ import (
 
 type SubscriptionEngine struct {
 	sub    Subscriber
+	logger log.Logger
 	router SubscriptionRouter
 	mc     *middleware.Chain
 
@@ -17,12 +19,17 @@ type SubscriptionEngine struct {
 }
 
 func NewSubscriptionEngine(sub Subscriber, router SubscriptionRouter) *SubscriptionEngine {
+	return NewLoggedSubscriptionEngine(sub, router, nil)
+}
+
+func NewLoggedSubscriptionEngine(sub Subscriber, router SubscriptionRouter, l log.Logger) *SubscriptionEngine {
 	engine := &SubscriptionEngine{
 		sub:       sub,
 		router:    router,
 		mc:        middleware.NewChain(),
 		lock:      sync.Mutex{},
 		handlerFn: nil,
+		logger:    l,
 	}
 	return engine
 }
@@ -53,29 +60,41 @@ func (e *SubscriptionEngine) Start(ctx context.Context) error {
 		//Avoid golang loop variable issue
 		loopMsg := msg
 		go func() {
-			handleMessage(loopMsg, e.handlerFn)
+			e.handleMessage(loopMsg, e.handlerFn)
 		}()
 	}
 	return nil
 }
 
-func handleMessage(
+func (e *SubscriptionEngine) handleMessage(
 	msg *message.Message,
 	handler message.HandlerFunc) {
 	defer func() {
 		//intercept panic to nack the message, and then resume the panic
 		if recovered := recover(); recovered != nil {
 			msg.Nack()
+			if e.logger != nil {
+				e.logger.Warnf(msg.Context(), "subscription engine nacked message %s due to panic", msg.ID)
+			}
 			//continue the panic
 			//if you don't want a panic, add a middleware to recover from panics
 			panic(recovered)
 		}
 	}()
+	if e.logger != nil {
+		e.logger.Debugf(msg.Context(), "subscription engine processing message %s", msg.ID)
+	}
 	err := handler(msg)
 	if err != nil {
 		msg.Nack()
+		if e.logger != nil {
+			e.logger.Warnf(msg.Context(), "subscription engine nacked message %s due to handler returning error", msg.ID)
+		}
 		return
 	}
 	msg.Ack()
+	if e.logger != nil {
+		e.logger.Infof(msg.Context(), "subscription engine acked message %s", msg.ID)
+	}
 	return
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/quantumcycle/expedit/google/emulator"
 	promware "github.com/quantumcycle/expedit/prometheus/middleware"
 	"github.com/sony/gobreaker/v2"
+	"log/slog"
 	"math/rand"
 	"os"
 	"reflect"
@@ -90,6 +91,13 @@ func AddStructNameToMetadata() middleware.Middleware {
 }
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	logger.Debug("Debug message")
+	logger.Info("Info message")
+	logger.Warn("Warning message")
+	logger.Error("Error message", "time", time.Now().Add(1*time.Hour))
+
 	os.Setenv("PUBSUB_EMULATOR_HOST", "localhost:29085")
 	var err error
 	var client *pubsub.Client

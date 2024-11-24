@@ -177,6 +177,23 @@ something expected by your handlers.
 
 Then, you have some methods on the message itself. The most important ones are `Ack` and `Nack` to acknowledge or reject the message.
 
+### Logging
+
+This library doesn't enforce the use of any logging library. It uses a simple interface in `core/log` that is totally optional.
+If you want to start showing the logs, just provide an implementation compatible with the `Logger` interface. You can provide it
+to the `SubscriptionEngine` and `PublishingEngine` via the "Logged" version of their constructor, or to the `Router` via the
+`WithLogger` option.
+
+#### Conditional logging
+
+In a real production system, you probably don't want to have super verbose logging all the time if you're processing thousands
+of messages. One option is to use the both the `MessageContextLogger` and a middleware to detect errors. The `MessageContextLogger`
+will store log messages in the message context but won't actually log them. Then, you can use a middleware to check if an error
+occurred, and if so, you can route the messages from the `MessageContextLogger` to an actual logger so they will be outputted.
+One thing to be mindful about when doing this is that if you're also logging in your handlers, you should either make sure this is
+also using the `MessageContextLogger` or that your logging platform support out of order messages using log timestamps, because the
+messages logged in the middleware will be logged after the handler messages, only when an error is detected.
+
 ## Why
 
 I created this library after trying to use [Watermill](https://watermill.io/) in a work project. I found Watermill to be a great library,
