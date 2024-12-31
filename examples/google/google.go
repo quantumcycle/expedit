@@ -112,7 +112,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	msg := message.NewMessage(ctx, "id-1", examples.DummyEvent1{Prop1: "value1"})
+	msg := message.NewMessage(ctx, examples.DummyEvent1{Prop1: "value1"})
 	err = pubEngine.Publish(msg)
 	if err != nil {
 		panic(err)

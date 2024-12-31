@@ -27,9 +27,10 @@ func ConstantDestination(d Destination) RoutingFunc {
 	}
 }
 
-type MessageImplPublisher[T any] interface {
+type MessagesPublisherImpl[T any] interface {
 	io.Closer
 	Publish(ctx context.Context, message T) error
+	GetMessageID(message T) string
 }
 
 // MessagePublisher is a helper struct to help with the implementation of a Publisher implementation.
@@ -38,11 +39,11 @@ type MessageImplPublisher[T any] interface {
 type MessagePublisher[T any] struct {
 	RoutingFunc             RoutingFunc
 	MessageMarshaller       func(msg *message.Message) (T, error)
-	GetDestinationPublisher func(d Destination) (MessageImplPublisher[T], error)
+	GetDestinationPublisher func(d Destination) (MessagesPublisherImpl[T], error)
 	PublishTimeout          time.Duration
 
 	lock       sync.RWMutex
-	publishers map[Destination]MessageImplPublisher[T]
+	publishers map[Destination]MessagesPublisherImpl[T]
 	closed     bool
 }
 
@@ -63,10 +64,19 @@ func (p *MessagePublisher[T]) Publish(message *message.Message) error {
 		return err
 	}
 
-	return pub.Publish(message.Context(), msgImpl)
+	err = pub.Publish(message.Context(), msgImpl)
+	if err != nil {
+		return err
+	}
+
+	// Try to get the generated message ID from the underlying publisher implementation
+	if id := pub.GetMessageID(msgImpl); id != "" {
+		message.ID = id
+	}
+	return nil
 }
 
-func (p *MessagePublisher[T]) getPublisher(dest Destination) (pub MessageImplPublisher[T], err error) {
+func (p *MessagePublisher[T]) getPublisher(dest Destination) (pub MessagesPublisherImpl[T], err error) {
 	p.lock.RLock()
 	t, ok := p.publishers[dest]
 	p.lock.RUnlock()

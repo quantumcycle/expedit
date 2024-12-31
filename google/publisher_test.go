@@ -4,7 +4,6 @@ import (
 	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
-	"github.com/google/uuid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/core/message"
@@ -51,6 +50,36 @@ var _ = Describe("Google Publisher", Ordered, func() {
 		Expect(err).To(MatchError("routing function is required"))
 	})
 
+	It("should return an error when trying to publish a message with an ID", func() {
+		pub, err := google.NewGooglePublisher(client,
+			publisher.ConstantDestination(topic.Name),
+			google.WithOrderingKeyProvider(func(msg *message.Message) string {
+				//use the same key for all messages, so they should be received in order
+				return "test-key"
+			}))
+
+		pubEngine := publisher.NewPublishingEngine(pub)
+		msg := message.NewMessage(context.Background(), []byte("msg1"))
+		msg.ID = "something"
+		err = pubEngine.Publish(msg)
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("should return the generated ID from pubsub in the message pointer", func() {
+		pub, err := google.NewGooglePublisher(client,
+			publisher.ConstantDestination(topic.Name),
+			google.WithOrderingKeyProvider(func(msg *message.Message) string {
+				//use the same key for all messages, so they should be received in order
+				return "test-key"
+			}))
+
+		pubEngine := publisher.NewPublishingEngine(pub)
+		msg := message.NewMessage(context.Background(), []byte("msg1"))
+		err = pubEngine.Publish(msg)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(msg.ID).NotTo(BeEmpty())
+	})
+
 	It("should use the routing function to determine the target topic", func() {
 		ctx := context.Background()
 
@@ -62,7 +91,7 @@ var _ = Describe("Google Publisher", Ordered, func() {
 		msgs2 := sub2.MessageChannel(context.Background(), 1)
 
 		routingFn := func(msg *message.Message) (publisher.Destination, error) {
-			if msg.ID == "id-2" {
+			if msg.Metadata["destination"] == "topic2" {
 				return topic2.Name, nil
 			}
 			return topic.Name, nil
@@ -75,9 +104,9 @@ var _ = Describe("Google Publisher", Ordered, func() {
 			}))
 
 		pubEngine := publisher.NewPublishingEngine(pub)
-		err = pubEngine.Publish(message.NewMessage(context.Background(), "id-1", []byte("msg1")))
+		err = pubEngine.Publish(message.NewMessage(context.Background(), []byte("msg1")).WithMetadata("destination", "topic2"))
 		Expect(err).NotTo(HaveOccurred())
-		err = pubEngine.Publish(message.NewMessage(context.Background(), "id-2", []byte("msg2")))
+		err = pubEngine.Publish(message.NewMessage(context.Background(), []byte("msg2")))
 		Expect(err).NotTo(HaveOccurred())
 
 		ExpectNbMessages(msgs1, 1, 1*time.Second)
@@ -96,7 +125,7 @@ var _ = Describe("Google Publisher", Ordered, func() {
 					return msg.Metadata
 				}))
 			pubEngine := publisher.NewPublishingEngine(pub)
-			err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("message1")).WithMetadata("key1", "value1"))
+			err = pubEngine.Publish(message.NewMessage(context.Background(), []byte("message1")).WithMetadata("key1", "value1"))
 			Expect(err).NotTo(HaveOccurred())
 
 			receivedMsg := <-msgs
@@ -121,7 +150,7 @@ var _ = Describe("Google Publisher", Ordered, func() {
 			var sentMsgs []interface{}
 			for i := 0; i < 100; i++ {
 				msg := fmt.Sprintf("message %d", i+1)
-				err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte(msg)))
+				err = pubEngine.Publish(message.NewMessage(context.Background(), []byte(msg)))
 				Expect(err).NotTo(HaveOccurred())
 				sentMsgs = append(sentMsgs, msg)
 			}

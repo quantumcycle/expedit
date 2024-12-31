@@ -19,6 +19,13 @@ func (p *ChannelPublisher) Publish(msg *message.Message) error {
 	return nil
 }
 
+func (p *ChannelPublisher) GetMessageID(msg *message.Message) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.ID
+}
+
 func (p *ChannelPublisher) Close() error {
 	close(p.channel)
 	return nil
