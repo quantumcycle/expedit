@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/message/middleware"
@@ -32,12 +31,12 @@ func main() {
 	pubEngine.AddMiddleware(promware.PrometheusMetricsDurationVec(examples.CreatePromOutgoingDuration([]string{"publisher"}), publisherLabelsProducer))
 	pubEngine.AddMiddleware(middleware.ConvertPanicToError())
 
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), examples.DummyEvent1{Prop1: "value1"}).
+	err = pubEngine.Publish(message.NewMessage(context.Background(), examples.DummyEvent1{Prop1: "value1"}).
 		WithMetadata("event_type", "DummyEvent1"))
 	if err != nil {
 		panic(err)
 	}
-	err = pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), examples.DummyEvent2{Prop2: "value2"}).
+	err = pubEngine.Publish(message.NewMessage(context.Background(), examples.DummyEvent2{Prop2: "value2"}).
 		WithMetadata("event_type", "DummyEvent2"))
 	if err != nil {
 		panic(err)

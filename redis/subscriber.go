@@ -166,7 +166,8 @@ func NewRedisSubscriber(
 			} else {
 				payload = wrapper.msg.Values
 			}
-			msg := message.NewMessage(ctx, wrapper.msg.ID, payload)
+			msg := message.NewMessage(ctx, payload)
+			msg.ID = wrapper.msg.ID
 			msg.Metadata = metadata
 			return msg, nil
 		},

@@ -84,7 +84,8 @@ func NewGoogleSubscriber(
 			msg.Nack()
 		},
 		MessageUnmarshall: func(ctx context.Context, pubMsg *pubsub.Message) (*message.Message, error) {
-			msg := message.NewMessage(ctx, pubMsg.ID, pubMsg.Data)
+			msg := message.NewMessage(ctx, pubMsg.Data)
+			msg.ID = pubMsg.ID
 			msg.Metadata = pubMsg.Attributes
 			return msg, nil
 		},

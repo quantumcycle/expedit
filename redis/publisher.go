@@ -83,6 +83,13 @@ func (s Stream) Publish(ctx context.Context, message *redis.XAddArgs) error {
 	return cmd.Err()
 }
 
+func (s Stream) GetMessageID(message *redis.XAddArgs) string {
+	if message == nil {
+		return ""
+	}
+	return message.ID
+}
+
 func NewRedisPublisher(
 	c *redis.Client,
 	routingFunc publisher.RoutingFunc,
@@ -128,7 +135,7 @@ func NewRedisPublisher(
 			}
 
 			//redis will use * to generate an ID when id is empty string
-			var id = ""
+			var id = msg.ID
 			if options.idGenerator != nil {
 				var err error
 				id, err = options.idGenerator(msg)
@@ -144,7 +151,7 @@ func NewRedisPublisher(
 			}, nil
 		},
 		PublishTimeout: options.publishTimeout,
-		GetDestinationPublisher: func(dest publisher.Destination) (publisher.MessageImplPublisher[*redis.XAddArgs], error) {
+		GetDestinationPublisher: func(dest publisher.Destination) (publisher.MessagesPublisherImpl[*redis.XAddArgs], error) {
 			st := Stream{
 				client: c,
 				name:   string(dest),

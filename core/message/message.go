@@ -28,9 +28,9 @@ type Message struct {
 	stateChan []chan State
 }
 
-func NewMessage(ctx context.Context, id string, payload Payload) *Message {
+func NewMessage(ctx context.Context, payload Payload) *Message {
 	return &Message{
-		ID:       id,
+		ID:       "",
 		Metadata: make(map[string]string),
 		Payload:  payload,
 		ctx:      ctx,
@@ -103,7 +103,7 @@ func (m *Message) SetContext(ctx context.Context) *Message {
 }
 
 func (m *Message) Copy() *Message {
-	msg := NewMessage(m.ctx, m.ID, m.Payload)
+	msg := NewMessage(m.ctx, m.Payload)
 	msg.Metadata = maps.Clone(m.Metadata)
 	return msg
 }

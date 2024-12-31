@@ -2,7 +2,6 @@ package redis_test
 
 import (
 	"context"
-	"fmt"
 	"github.com/lithammer/shortuuid/v3"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -77,7 +76,7 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 		stream2 := publisher.Destination("stream-2-" + shortuuid.New())
 
 		routingFn := func(msg *message.Message) (publisher.Destination, error) {
-			if msg.ID == "id-2" {
+			if msg.Metadata["destination"] == "stream2" {
 				return stream2, nil
 			}
 			return stream1, nil
@@ -87,11 +86,11 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 			SimpleMarshaller)
 
 		pubEngine := publisher.NewPublishingEngine(pub)
-		err = pubEngine.Publish(message.NewMessage(context.Background(), "id-1", map[string]interface{}{
+		err = pubEngine.Publish(message.NewMessage(context.Background(), map[string]interface{}{
 			"key": "value1",
-		}))
+		}).WithMetadata("destination", "stream2"))
 		Expect(err).NotTo(HaveOccurred())
-		err = pubEngine.Publish(message.NewMessage(context.Background(), "id-2", map[string]interface{}{
+		err = pubEngine.Publish(message.NewMessage(context.Background(), map[string]interface{}{
 			"key": "value2",
 		}))
 		Expect(err).NotTo(HaveOccurred())
@@ -111,7 +110,6 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 		expectedMessages := 10
 		for i := 0; i < expectedMessages; i++ {
 			err = pubEngine.Publish(message.NewMessage(context.Background(),
-				fmt.Sprintf("id-%d", i+1),
 				map[string]interface{}{
 					"key": "value",
 				}))
