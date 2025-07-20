@@ -6,7 +6,6 @@ import (
 	"github.com/quantumcycle/expedit/core/message"
 	"io"
 	"sync"
-	"time"
 )
 
 type Publisher interface {
@@ -27,6 +26,30 @@ func ConstantDestination(d Destination) RoutingFunc {
 	}
 }
 
+type MessageBoolOptFunc func(msg *message.Message) (bool, error)
+
+func ConstantBoolMsgFn(value bool) MessageBoolOptFunc {
+	return func(msg *message.Message) (bool, error) {
+		return value, nil
+	}
+}
+
+type MessageStringOptFunc func(msg *message.Message) (string, error)
+
+func ConstantStringMsgFn(s string) MessageStringOptFunc {
+	return func(msg *message.Message) (string, error) {
+		return s, nil
+	}
+}
+
+type MessageIntOptFunc func(msg *message.Message) (int, error)
+
+func ConstantIntMsgFn(i int) MessageIntOptFunc {
+	return func(msg *message.Message) (int, error) {
+		return i, nil
+	}
+}
+
 type MessagesPublisherImpl[T any] interface {
 	io.Closer
 	Publish(ctx context.Context, message T) error
@@ -40,7 +63,6 @@ type MessagePublisher[T any] struct {
 	RoutingFunc             RoutingFunc
 	MessageMarshaller       func(msg *message.Message) (T, error)
 	GetDestinationPublisher func(d Destination) (MessagesPublisherImpl[T], error)
-	PublishTimeout          time.Duration
 
 	lock       sync.RWMutex
 	publishers map[Destination]MessagesPublisherImpl[T]

@@ -19,24 +19,14 @@ type MessageUnmarshaller func(ctx context.Context, msg *redis.XMessage) (*messag
 type SubscriberOption func(*SubscriberOptions)
 
 type SubscriberOptions struct {
-	onUnmarshallingError               func(msg MessageWrapper, err error)
 	onProcessingTimeout                func(ctx context.Context, msg MessageWrapper)
 	consumerGroup                      string
 	consumerGroupCreateStreamIfMissing bool
 	consumerGroupStartID               StartPosition
 	startID                            StartPosition
 	processingTimeout                  time.Duration
-	metadataExtractor                  func(wrapper MessageWrapper) map[string]string
+	metadataExtractor                  func(wrapper MessageWrapper) map[string]interface{}
 	payloadExtractor                   func(wrapper MessageWrapper) map[string]interface{}
-}
-
-// WithUnmarshallingErrorHandler takes a function that is called when an error occurs while unmarshalling a message.
-// If this option is provided, the callback is responsible for handling the error and optionally calling msg.Nack().
-// If this option is not provided, the default behaviour is to call msg.Nack().
-func WithUnmarshallingErrorHandler(handler func(msg MessageWrapper, err error)) SubscriberOption {
-	return func(opts *SubscriberOptions) {
-		opts.onUnmarshallingError = handler
-	}
 }
 
 // WithProcessingTimeoutHandler takes a function that is called when a message processing times out.
@@ -90,7 +80,7 @@ func WithProcessingTimeout(timeout time.Duration) SubscriberOption {
 // WithMetadataExtractor is a function that extracts metadata from a redis message.
 // If not provided, no metadata will be extracted. The extractor usually needs to be aligned with the
 // marshaller used by the publisher.
-func WithMetadataExtractor(extractor func(wrapper MessageWrapper) map[string]string) SubscriberOption {
+func WithMetadataExtractor(extractor func(wrapper MessageWrapper) map[string]interface{}) SubscriberOption {
 	return func(opts *SubscriberOptions) {
 		opts.metadataExtractor = extractor
 	}
@@ -143,20 +133,17 @@ func NewRedisSubscriber(
 	}
 
 	processor := subscriber.MessageProcessor[MessageWrapper]{
-		Ack: func(ctx context.Context, wrapper MessageWrapper) {
+		Ack: func(ctx context.Context, wrapper MessageWrapper) error {
 			//TODO: Xack seems to be only useful for consumer groups, should we add a IF to only apply on consumer groups?
 			_, err := c.XAck(ctx, wrapper.stream, wrapper.consumerGroup, wrapper.msg.ID).Result()
-			if err != nil {
-				//TODO, handle this error instead of panicking
-				//Retry a couple of time? If it doesn't work, it will be redelivered
-				panic(err)
-			}
+			return err
 		},
-		Nack: func(ctx context.Context, wrapper MessageWrapper) {
+		Nack: func(ctx context.Context, wrapper MessageWrapper) error {
 			//TODO: see the XCLAIM comment above
+			return nil
 		},
-		MessageUnmarshall: func(ctx context.Context, wrapper MessageWrapper) (*message.Message, error) {
-			metadata := map[string]string{}
+		MessageUnmarshall: func(ctx context.Context, wrapper MessageWrapper) *message.Message {
+			metadata := make(map[string]interface{})
 			if options.metadataExtractor != nil {
 				metadata = options.metadataExtractor(wrapper)
 			}
@@ -169,11 +156,10 @@ func NewRedisSubscriber(
 			msg := message.NewMessage(ctx, payload)
 			msg.ID = wrapper.msg.ID
 			msg.Metadata = metadata
-			return msg, nil
+			return msg
 		},
-		OnUnmarshallingError: options.onUnmarshallingError,
-		ProcessingTimeout:    options.processingTimeout,
-		OnProcessingTimeout:  options.onProcessingTimeout,
+		ProcessingTimeout:   options.processingTimeout,
+		OnProcessingTimeout: options.onProcessingTimeout,
 	}
 	internalSubscriber := subscriber.MessageSubscriber[*pubsub.Message]{
 		InitializeFn: func(ctx context.Context, outputCh chan *message.Message) error {

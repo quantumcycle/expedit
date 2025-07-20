@@ -17,32 +17,32 @@ type Subscriber interface {
 
 var ErrClosed = errors.New("subscriber is closed")
 
+type AckNackFn[T any] func(ctx context.Context, msgImpl T) error
+
+// OnAckNackErrorFn is an error handler for when Ack or Nack fails. The `ack` bool if the error occured for Ack (true)
+// or Nack (false). The `ackNackFn` is the internal function that performs the Ack or Nack. It's provided to be able
+// to retry the operation. `err` is the original error that caused the Ack or Nack to fail.
+type OnAckNackErrorFn[T any] func(ctx context.Context, msgImpl T, ack bool, ackNackFn AckNackFn[T], err error)
+
 // MessageProcessor is a helper struct to facilitate the different implementations of Subscribers.
 // You just need to provide the different functions to act on the underlying message of your implementation.
 type MessageProcessor[T any] struct {
-	Ack  func(ctx context.Context, msg T)
-	Nack func(ctx context.Context, msg T)
+	Ack  AckNackFn[T]
+	Nack AckNackFn[T]
 
-	MessageUnmarshall    func(ctx context.Context, msgImpl T) (*message.Message, error)
-	OnUnmarshallingError func(msgImpl T, err error)
+	MessageUnmarshall func(ctx context.Context, msgImpl T) *message.Message
 
 	ProcessingTimeout   time.Duration
 	OnProcessingTimeout func(ctx context.Context, msgImpl T)
+
+	OnAckError  OnAckNackErrorFn[T]
+	OnNackError OnAckNackErrorFn[T]
 }
 
 func (p MessageProcessor[T]) ProcessMessage(ctx context.Context, msgImpl T, outputCh chan *message.Message) {
 	withCancelCtx, msgCtxCancel := context.WithCancel(ctx)
 
-	msg, err := p.MessageUnmarshall(withCancelCtx, msgImpl)
-	if err != nil {
-		if p.OnUnmarshallingError != nil {
-			p.OnUnmarshallingError(msgImpl, err)
-		} else {
-			p.Nack(ctx, msgImpl)
-		}
-		msgCtxCancel()
-		return
-	}
+	msg := p.MessageUnmarshall(withCancelCtx, msgImpl)
 
 	var stateChSubscribeDone sync.WaitGroup
 
@@ -79,9 +79,19 @@ func (p MessageProcessor[T]) ProcessMessage(ctx context.Context, msgImpl T, outp
 		select {
 		case state := <-stateCh:
 			if state == message.Ack {
-				p.Ack(withCancelCtx, msgImpl)
+				err := p.Ack(withCancelCtx, msgImpl)
+				//if error handler is not configured, the error is ignored
+				//TODO: once we add logging, we should log the error as a fallback
+				if err != nil && p.OnAckError != nil {
+					p.OnAckError(withCancelCtx, msgImpl, true, p.Ack, err)
+				}
 			} else if state == message.Nack {
-				p.Nack(withCancelCtx, msgImpl)
+				err := p.Nack(withCancelCtx, msgImpl)
+				//if error handler is not configured, the error is ignored
+				//TODO: once we add logging, we should log the error as a fallback
+				if err != nil && p.OnNackError != nil {
+					p.OnAckError(withCancelCtx, msgImpl, false, p.Nack, err)
+				}
 			}
 		}
 		msgCtxCancel()

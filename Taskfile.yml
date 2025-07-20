@@ -1,5 +1,7 @@
 version: '3'
 
+dotenv: ['.env']
+
 includes:
   core:
     taskfile: ./core/task.yml
@@ -10,11 +12,30 @@ includes:
   redis:
     taskfile: ./redis/task.yml
     dir: ./redis
+  amqp:
+    taskfile: ./amqp/task.yml
+    dir: ./amqp
 
 tasks:
+  du:
+    desc: Start podman compose dependencies
+    cmds:
+      - task: google:du
+      - task: redis:du
+      - task: amqp:du
+
+  dd:
+    desc: Stop podman compose dependencies
+    cmds:
+      - task: google:dd
+      - task: redis:dd
+      - task: amqp:dd
+
   test:
     desc: "Run all the tests in all modules"
-    cmds:
+    # using dependencies, to ensure parallel execution
+    deps:
       - task: core:test
       - task: google:test
       - task: redis:test
+      - task: amqp:test

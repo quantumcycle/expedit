@@ -7,7 +7,7 @@ import (
 	"sync"
 )
 
-type Metadata map[string]string
+type Metadata map[string]interface{}
 type Payload any
 
 type State int
@@ -31,14 +31,14 @@ type Message struct {
 func NewMessage(ctx context.Context, payload Payload) *Message {
 	return &Message{
 		ID:       "",
-		Metadata: make(map[string]string),
+		Metadata: make(map[string]interface{}),
 		Payload:  payload,
 		ctx:      ctx,
 		state:    Processing,
 	}
 }
 
-func (m *Message) WithMetadata(key, value string) *Message {
+func (m *Message) WithMetadata(key string, value interface{}) *Message {
 	m.Metadata[key] = value
 	return m
 }

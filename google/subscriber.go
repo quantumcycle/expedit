@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/subscriber"
+	"strconv"
 	"time"
 )
 
@@ -16,19 +17,10 @@ type MessageUnmarshaller func(ctx context.Context, msg *pubsub.Message) (*messag
 type SubscriberOption func(*SubscriberOptions)
 
 type SubscriberOptions struct {
-	onUnmarshallingError func(msg *pubsub.Message, err error)
-	onProcessingTimeout  func(ctx context.Context, msg *pubsub.Message)
-	processingTimeout    time.Duration
-	receiveSettings      pubsub.ReceiveSettings
-}
-
-// WithUnmarshallingErrorHandler is a function that is called when an error occurs while unmarshalling a message.
-// If this option is provided, the callback is responsible for handling the error and optionally calling msg.Nack().
-// If this option is not provided, the default behaviour is to call msg.Nack().
-func WithUnmarshallingErrorHandler(handler func(msg *pubsub.Message, err error)) SubscriberOption {
-	return func(opts *SubscriberOptions) {
-		opts.onUnmarshallingError = handler
-	}
+	onProcessingTimeout func(ctx context.Context, msg *pubsub.Message)
+	processingTimeout   time.Duration
+	receiveSettings     pubsub.ReceiveSettings
+	parseAttributes     bool
 }
 
 // WithProcessingTimeoutHandler is a function that is called when a message processing times out.
@@ -55,6 +47,14 @@ func WithReceiveSettings(settings pubsub.ReceiveSettings) SubscriberOption {
 	}
 }
 
+// WithParseAttributes is a flag to indicate if the attributes should be parsed or not, meaning that boolean true/false,
+// integers and floats are going to be their respective types. The default is to just keep everything as strings.
+func WithParseAttributes(parseAttributes bool) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.parseAttributes = parseAttributes
+	}
+}
+
 type Subscriber struct {
 	internalSubscriber *subscriber.MessageSubscriber[*pubsub.Message]
 }
@@ -77,21 +77,31 @@ func NewGoogleSubscriber(
 	}
 
 	processor := subscriber.MessageProcessor[*pubsub.Message]{
-		Ack: func(ctx context.Context, msg *pubsub.Message) {
+		Ack: func(ctx context.Context, msg *pubsub.Message) error {
 			msg.Ack()
+			return nil
 		},
-		Nack: func(ctx context.Context, msg *pubsub.Message) {
+		Nack: func(ctx context.Context, msg *pubsub.Message) error {
 			msg.Nack()
+			return nil
 		},
-		MessageUnmarshall: func(ctx context.Context, pubMsg *pubsub.Message) (*message.Message, error) {
+		MessageUnmarshall: func(ctx context.Context, pubMsg *pubsub.Message) *message.Message {
+			metadata := make(map[string]interface{})
+			for k, v := range pubMsg.Attributes {
+				if options.parseAttributes {
+					metadata[k] = parseAsPrimitiveType(v)
+				} else {
+					metadata[k] = v
+				}
+			}
+
 			msg := message.NewMessage(ctx, pubMsg.Data)
 			msg.ID = pubMsg.ID
-			msg.Metadata = pubMsg.Attributes
-			return msg, nil
+			msg.Metadata = metadata
+			return msg
 		},
-		OnUnmarshallingError: options.onUnmarshallingError,
-		ProcessingTimeout:    options.processingTimeout,
-		OnProcessingTimeout:  options.onProcessingTimeout,
+		ProcessingTimeout:   options.processingTimeout,
+		OnProcessingTimeout: options.onProcessingTimeout,
 	}
 	internalSubscriber := subscriber.MessageSubscriber[*pubsub.Message]{
 		InitializeFn: func(ctx context.Context, outputCh chan *message.Message) error {
@@ -113,6 +123,27 @@ func NewGoogleSubscriber(
 	return &Subscriber{
 		internalSubscriber: &internalSubscriber,
 	}, nil
+}
+
+// parseAsPrimitiveType will try to parse the value as a primitive type, if it fails, it will return the original value.
+// It supports boolean, integers and floats. Otherwise, it will return the original value as string
+func parseAsPrimitiveType(v string) interface{} {
+	b, err := strconv.ParseBool(v)
+	if err == nil {
+		return b
+	}
+
+	i, err := strconv.ParseInt(v, 10, 64)
+	if err == nil {
+		return i
+	}
+
+	f, err := strconv.ParseFloat(v, 64)
+	if err == nil {
+		return f
+	}
+
+	return v
 }
 
 func (s *Subscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {

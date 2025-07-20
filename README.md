@@ -17,6 +17,9 @@ go get -u github.com/quantumcycle/expedit/google
 
 # Redis
 go get -u github.com/quantumcycle/expedit/redis
+
+# AMQP (RabbitMQ)
+go get -u github.com/quantumcycle/expedit/amqp
 ```
 
 ### Example
@@ -25,15 +28,15 @@ Check the code in the [example](example/main.go) folder for a working example.
 
 ## Supported implementations
 
-| Impl              |  Status  | Notes                                     |
-|-------------------|:--------:|-------------------------------------------|
-| Golang channel    |   Beta   | Publisher and subscriber written          |
-| Google GCP Pubsub |   Beta   | Publisher and subscriber written          |
-| Redis stream      |  Alpha   | Some corner cases to address, like XCLAIM |
-| Kafka             | Planned  |                                           |
-| Amazon SNS        | Planned  |                                           |
-| Amazon SQS        | Planned  |                                           |
-| Rabbit MQ         | Planned  |                                           |
+| Impl              | Status  | Notes                                     |
+|-------------------|:-------:|-------------------------------------------|
+| Golang channel    |  Beta   | Publisher and subscriber written          |
+| Google GCP Pubsub |  Beta   | Publisher and subscriber written          |
+| Redis stream      |  Alpha  | Some corner cases to address, like XCLAIM |
+| Kafka             | Planned |                                           |
+| Amazon SNS        | Planned |                                           |
+| Amazon SQS        | Planned |                                           |
+| AMQP (Rabbit MQ)  |  Beta   | Publisher, subscriber, examples, and load tests implemented. |
 
 ## Definitions
 
