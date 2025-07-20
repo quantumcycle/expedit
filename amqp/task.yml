@@ -14,7 +14,7 @@ tasks:
       - ${DOCKER_COMMAND:-docker} compose -f ./docker-compose.yml down
 
   test:
-    desc: "Run all the tests in google module"
+    desc: "Run all the tests in amqp module"
     deps:
       - dependencies-up
     cmds:

@@ -6,10 +6,7 @@ import (
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/redis/go-redis/v9"
-	"time"
 )
-
-var DefaultPublishTimeout = 60 * time.Second
 
 type PublisherOption func(*PublisherOptions)
 
@@ -18,7 +15,6 @@ type PublisherOptions struct {
 	idGenerator        IDGenerator
 	maxlen             int64
 	approx             bool
-	publishTimeout     time.Duration
 	metadataMarshaller XAddValuesMarshaller
 }
 
@@ -41,13 +37,6 @@ func WithMaxlen(maxlen int64) PublisherOption {
 func WithApprox(approx bool) PublisherOption {
 	return func(opts *PublisherOptions) {
 		opts.approx = approx
-	}
-}
-
-// WithPublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
-func WithPublishTimeout(timeout time.Duration) PublisherOption {
-	return func(opts *PublisherOptions) {
-		opts.publishTimeout = timeout
 	}
 }
 
@@ -105,9 +94,7 @@ func NewRedisPublisher(
 		return nil, errors.New("payloadMarshaller is required")
 	}
 
-	options := PublisherOptions{
-		publishTimeout: DefaultPublishTimeout,
-	}
+	options := PublisherOptions{}
 
 	for _, opt := range opts {
 		opt(&options)
@@ -150,7 +137,6 @@ func NewRedisPublisher(
 				ID:     id,
 			}, nil
 		},
-		PublishTimeout: options.publishTimeout,
 		GetDestinationPublisher: func(dest publisher.Destination) (publisher.MessagesPublisherImpl[*redis.XAddArgs], error) {
 			st := Stream{
 				client: c,

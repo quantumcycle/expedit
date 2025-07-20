@@ -1,0 +1,43 @@
+services:
+  expedit-rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: 'rabbitmq'
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - rabbitmq-network
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    # Fix permissions for Podman
+    user: "999:999"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  expedit-amqp-toxiproxy:
+    image: ghcr.io/shopify/toxiproxy
+    container_name: 'amqp-toxiproxy'
+    ports:
+      - "8474:8474"    # Toxiproxy admin API (AMQP module)
+      - "25672:25672"  # Proxy port for RabbitMQ
+    networks:
+      - rabbitmq-network
+    depends_on:
+      - expedit-rabbitmq
+    # Simple dependency without health check for Podman compatibility
+    restart: unless-stopped
+
+networks:
+  rabbitmq-network:
+    driver: bridge
+
+volumes:
+  rabbitmq_data:
+    driver: local

@@ -8,4 +8,5 @@ use (
 	./google
 	./prometheus
 	./redis
+	./amqp
 )

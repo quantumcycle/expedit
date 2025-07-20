@@ -121,9 +121,7 @@ var _ = Describe("Google Publisher", Ordered, func() {
 
 			pub, err := google.NewGooglePublisher(client,
 				publisher.ConstantDestination(topic.Name),
-				google.WithAttributesProvider(func(msg *message.Message) map[string]string {
-					return msg.Metadata
-				}))
+				google.WithAttributesProvider(google.MetadataAsAttributes))
 			pubEngine := publisher.NewPublishingEngine(pub)
 			err = pubEngine.Publish(message.NewMessage(context.Background(), []byte("message1")).WithMetadata("key1", "value1"))
 			Expect(err).NotTo(HaveOccurred())

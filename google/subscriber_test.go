@@ -86,6 +86,172 @@ var _ = Describe("Google Subscriber", func() {
 		}, 3*time.Second).Should(Equal(expectedMsgCount))
 	})
 
+	When("parse attributes is enabled", func() {
+		It("should convert bool", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+
+			subscriber, err := google.NewGoogleSubscriber(client,
+				subscription.Name, google.WithParseAttributes(true))
+			Expect(err).NotTo(HaveOccurred())
+
+			msgCh, err := subscriber.Subscribe(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			defer subscriber.Close()
+
+			var att1Val interface{}
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case msg := <-msgCh:
+						if msg == nil {
+							return
+						}
+						att1Val = msg.Metadata["att1"]
+					}
+				}
+			}()
+
+			attrs := make(map[string]string)
+			attrs["att1"] = "true"
+			topic.PublishBytes(ctx, []byte("payload"), attrs)
+
+			//Wait for the message to be processed
+			Eventually(func() interface{} {
+				return att1Val
+			}).Should(Not(BeNil()))
+
+			//Check that we have true as boolean and not string
+			Expect(att1Val).To(Equal(true))
+		})
+
+		It("should convert float", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+
+			subscriber, err := google.NewGoogleSubscriber(client,
+				subscription.Name, google.WithParseAttributes(true))
+			Expect(err).NotTo(HaveOccurred())
+
+			msgCh, err := subscriber.Subscribe(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			defer subscriber.Close()
+
+			var att1Val interface{}
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case msg := <-msgCh:
+						if msg == nil {
+							return
+						}
+						att1Val = msg.Metadata["att1"]
+					}
+				}
+			}()
+
+			attrs := make(map[string]string)
+			attrs["att1"] = "10.231"
+			topic.PublishBytes(ctx, []byte("payload"), attrs)
+
+			//Wait for the message to be processed
+			Eventually(func() interface{} {
+				return att1Val
+			}).Should(Not(BeNil()))
+
+			//Check that we have true as float and not string
+			Expect(att1Val).To(Equal(10.231))
+		})
+
+		It("should convert integer", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+
+			subscriber, err := google.NewGoogleSubscriber(client,
+				subscription.Name, google.WithParseAttributes(true))
+			Expect(err).NotTo(HaveOccurred())
+
+			msgCh, err := subscriber.Subscribe(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			defer subscriber.Close()
+
+			var att1Val interface{}
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case msg := <-msgCh:
+						if msg == nil {
+							return
+						}
+						att1Val = msg.Metadata["att1"]
+					}
+				}
+			}()
+
+			attrs := make(map[string]string)
+			attrs["att1"] = "10"
+			topic.PublishBytes(ctx, []byte("payload"), attrs)
+
+			//Wait for the message to be processed
+			Eventually(func() interface{} {
+				return att1Val
+			}).Should(Not(BeNil()))
+
+			//Check that we have true as int and not string
+			Expect(att1Val).To(Equal(int64(10)))
+		})
+
+		It("should keep string as is", func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+
+			subscriber, err := google.NewGoogleSubscriber(client,
+				subscription.Name, google.WithParseAttributes(true))
+			Expect(err).NotTo(HaveOccurred())
+
+			msgCh, err := subscriber.Subscribe(ctx)
+			Expect(err).NotTo(HaveOccurred())
+			defer subscriber.Close()
+
+			var att1Val interface{}
+			go func() {
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case msg := <-msgCh:
+						if msg == nil {
+							return
+						}
+						att1Val = msg.Metadata["att1"]
+					}
+				}
+			}()
+
+			attrs := make(map[string]string)
+			attrs["att1"] = "hello"
+			topic.PublishBytes(ctx, []byte("payload"), attrs)
+
+			//Wait for the message to be processed
+			Eventually(func() interface{} {
+				return att1Val
+			}).Should(Not(BeNil()))
+
+			//Check that we have true as int and not string
+			Expect(att1Val).To(Equal("hello"))
+		})
+	})
+
 	It("should nack messages that are not ack/nacked after the processing timeout", func() {
 		//We cannot query the emulator to see if the message was nacked, so the next best thing is to check if the
 		//event handler was called.

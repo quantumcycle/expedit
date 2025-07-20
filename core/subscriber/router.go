@@ -24,7 +24,8 @@ type RoutingKeyGenerator = func(msg *message.Message) RoutingKey
 func RouteFromMetadataKey(metadataKey string) RoutingKeyGenerator {
 	return func(msg *message.Message) RoutingKey {
 		val := msg.Metadata[metadataKey]
-		return RoutingKey(val)
+		valString := fmt.Sprintf("%v", val)
+		return RoutingKey(valString)
 	}
 }
 

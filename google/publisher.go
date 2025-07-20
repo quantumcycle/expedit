@@ -4,19 +4,21 @@ import (
 	"cloud.google.com/go/pubsub"
 	"context"
 	"errors"
+	"fmt"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
-	"time"
 )
-
-var DefaultPublishTimeout = 60 * time.Second
 
 type OrderingKeyProvider func(message *message.Message) string
 
 type AttributesProvider func(message *message.Message) map[string]string
 
 func MetadataAsAttributes(msg *message.Message) map[string]string {
-	return msg.Metadata
+	out := make(map[string]string, len(msg.Metadata))
+	for k, v := range msg.Metadata {
+		out[k] = fmt.Sprintf("%v", v)
+	}
+	return out
 }
 
 type PublisherOption func(*PublisherOptions)
@@ -24,7 +26,6 @@ type PublisherOption func(*PublisherOptions)
 type PublisherOptions struct {
 	orderingKeyProvider OrderingKeyProvider
 	attributesProvider  AttributesProvider
-	publishTimeout      time.Duration
 }
 
 // WithOrderingKeyProvider is a function that returns an ordering key for a given message. If not provided, no ordering key is used.
@@ -43,15 +44,16 @@ func WithAttributesProvider(provider AttributesProvider) PublisherOption {
 	}
 }
 
-// WithPublishTimeout is a timeout for publishing a message. DefaultPublishTimeout is used if not provided.
-func WithPublishTimeout(timeout time.Duration) PublisherOption {
-	return func(opts *PublisherOptions) {
-		opts.publishTimeout = timeout
-	}
-}
-
 type Publisher struct {
 	internalPublisher *publisher.MessagePublisher[*pubsub.Message]
+}
+
+func (p *Publisher) Publish(message *message.Message) error {
+	return p.internalPublisher.Publish(message)
+}
+
+func (p *Publisher) Close() error {
+	return p.internalPublisher.Close()
 }
 
 type PubsubTopic struct {
@@ -97,7 +99,6 @@ func NewGooglePublisher(
 	}
 
 	options := PublisherOptions{
-		publishTimeout:     DefaultPublishTimeout,
 		attributesProvider: MetadataAsAttributes,
 	}
 	for _, opt := range opts {
@@ -122,7 +123,6 @@ func NewGooglePublisher(
 			}
 			return msgImpl, nil
 		},
-		PublishTimeout: options.publishTimeout,
 		GetDestinationPublisher: func(dest publisher.Destination) (publisher.MessagesPublisherImpl[*pubsub.Message], error) {
 			pubTopic := c.Topic(string(dest))
 			if options.orderingKeyProvider != nil {
@@ -138,12 +138,4 @@ func NewGooglePublisher(
 		internalPublisher: internalPublisher,
 	}
 	return p, nil
-}
-
-func (p *Publisher) Publish(message *message.Message) error {
-	return p.internalPublisher.Publish(message)
-}
-
-func (p *Publisher) Close() error {
-	return p.internalPublisher.Close()
 }
