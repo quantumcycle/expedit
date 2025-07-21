@@ -4,51 +4,80 @@ import (
 	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
-	. "github.com/onsi/ginkgo/v2"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/quantumcycle/expedit/google"
 	"github.com/quantumcycle/expedit/google/emulator"
 	"golang.org/x/exp/rand"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
-// Load test scenario
-
-var _ = Describe("Google Pubsub load test", func() {
-	var client *pubsub.Client
-	var emuClient *emulator.PubsubTestClient
-	var topics []*emulator.TestTopic
-	var subs map[string]*emulator.TestSubscription
-
-	BeforeEach(func() {
-		topics = []*emulator.TestTopic{}
-		subs = make(map[string]*emulator.TestSubscription)
-		ctx := context.Background()
-		emuClient = emulator.NewTestClient(ctx, "test-project")
-
-		// Create topics and subscriptions
-		for i := 0; i < 3; i++ {
-			topic := emuClient.CreateTestTopic(ctx, fmt.Sprintf("test-topic-%d", i+1))
-			topics = append(topics, topic)
-
-			//for each topic, create 3 subscriptions
-			for j := 0; j < 3; j++ {
-				sub := topic.CreateTestSubscription(ctx, fmt.Sprintf("test-topic-%d-subscription-%d", i+1, j+1), true)
-				subs[sub.Name] = sub
+func findMissingMessages(sentMsgs []string, receivedMsgs []string) interface{} {
+	missing := []string{}
+	for _, sentMsg := range sentMsgs {
+		found := false
+		for _, receivedMsg := range receivedMsgs {
+			if sentMsg == receivedMsg {
+				found = true
+				break
 			}
 		}
+		if !found {
+			missing = append(missing, sentMsg)
+		}
+	}
+	return missing
+}
 
-		var err error
-		client, err = pubsub.NewClient(context.Background(), "test-project")
-		Expect(err).NotTo(HaveOccurred())
+func randomInt(lower int, higher int) int {
+	rand.Seed(uint64(time.Now().UnixNano()))
+	return rand.Intn(higher-lower+1) + lower
+}
+
+func setupGoogleLoadTest(t *testing.T) (*pubsub.Client, *emulator.PubsubTestClient, []*emulator.TestTopic, map[string]*emulator.TestSubscription) {
+	// Set the emulator host for Google PubSub
+	t.Setenv("PUBSUB_EMULATOR_HOST", "localhost:29085")
+	
+	topics := []*emulator.TestTopic{}
+	subs := make(map[string]*emulator.TestSubscription)
+	ctx := context.Background()
+	emuClient := emulator.NewTestClient(ctx, "test-project")
+
+	// Create topics and subscriptions
+	for i := 0; i < 3; i++ {
+		topic := emuClient.CreateTestTopic(ctx, fmt.Sprintf("test-topic-%d", i+1))
+		topics = append(topics, topic)
+
+		//for each topic, create 3 subscriptions
+		for j := 0; j < 3; j++ {
+			sub := topic.CreateTestSubscription(ctx, fmt.Sprintf("test-topic-%d-subscription-%d", i+1, j+1), true)
+			subs[sub.Name] = sub
+		}
+	}
+
+	client, err := pubsub.NewClient(context.Background(), "test-project")
+	if err != nil {
+		t.Fatalf("failed to create pubsub client: %v", err)
+	}
+
+	t.Cleanup(func() {
+		client.Close()
 	})
 
-	It("should process all the messages at scale", func() {
+	return client, emuClient, topics, subs
+}
+
+func TestGooglePubsubLoadTest(t *testing.T) {
+	t.Run("should process all the messages at scale", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		client, _, topics, subs := setupGoogleLoadTest(t)
+
 		ctx := context.Background()
 		var totalSentCount int64
 		var totalProcessedCount int64
@@ -69,10 +98,10 @@ var _ = Describe("Google Pubsub load test", func() {
 			//We expect about half of the messages to be processed by each subscriber
 			for j := 0; j < 2; j++ {
 				subscriber, err := google.NewGoogleSubscriber(client, sub.Name)
-				Expect(err).NotTo(HaveOccurred())
+				g.Expect(err).NotTo(HaveOccurred())
 
 				msgCh, err := subscriber.Subscribe(ctx)
-				Expect(err).NotTo(HaveOccurred())
+				g.Expect(err).NotTo(HaveOccurred())
 				go func(consumerIndex int, subscriptionName string) {
 					consumerID := fmt.Sprintf("%s-consumer-%d", subscriptionName, consumerIndex)
 					for msg := range msgCh {
@@ -100,7 +129,7 @@ var _ = Describe("Google Pubsub load test", func() {
 		// Create publishers
 		for _, topic := range topics {
 			pub, err := google.NewGooglePublisher(client, publisher.ConstantDestination(topic.Name))
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 
 			pubEngine := publisher.NewPublishingEngine(pub)
 			go func(publisherName string) {
@@ -108,7 +137,7 @@ var _ = Describe("Google Pubsub load test", func() {
 					payload := fmt.Sprintf("message %d", j+1)
 					msg := message.NewMessage(context.Background(), []byte(payload))
 					err = pubEngine.Publish(msg)
-					Expect(err).NotTo(HaveOccurred())
+					g.Expect(err).NotTo(HaveOccurred())
 					atomic.AddInt64(&totalSentCount, 1)
 					publisherMu.Lock()
 					if _, exists := publisherCounts[publisherName]; !exists {
@@ -121,12 +150,12 @@ var _ = Describe("Google Pubsub load test", func() {
 		}
 
 		// We have 3 topics, each with 3 subscriptions, so the total is the number of messages times 9
-		Eventually(func() int64 {
+		g.Eventually(func() int64 {
 			return atomic.LoadInt64(&totalProcessedCount)
 		}, "30s").Should(BeNumerically("==", nbMessagesToSendPerTopic*9))
 
 		//Should be at least one random nack
-		Expect(nackCount).To(BeNumerically(">", 0))
+		g.Expect(nackCount).To(BeNumerically(">", 0))
 
 		//each subscription has 2 consumers, so total for both should be nbMessagesToSendPerTopic
 		for subName, _ := range subs {
@@ -137,7 +166,7 @@ var _ = Describe("Google Pubsub load test", func() {
 			consumer2Msgs := consumerCounts[consumer2ID]
 
 			receivedMsgs := append(consumer1Msgs, consumer2Msgs...)
-			Expect(len(receivedMsgs)).To(Equal(nbMessagesToSendPerTopic))
+			g.Expect(len(receivedMsgs)).To(Equal(nbMessagesToSendPerTopic))
 
 			var sentMsgs []string
 			if strings.Index(subName, "test-topic-1") > 0 {
@@ -149,29 +178,7 @@ var _ = Describe("Google Pubsub load test", func() {
 			}
 
 			delta := findMissingMessages(sentMsgs, receivedMsgs)
-			Expect(delta).To(BeEmpty(), "Missing messages never received: %v", delta)
+			g.Expect(delta).To(BeEmpty(), "Missing messages never received: %v", delta)
 		}
 	})
-})
-
-func findMissingMessages(sentMsgs []string, receivedMsgs []string) interface{} {
-	missing := []string{}
-	for _, sentMsg := range sentMsgs {
-		found := false
-		for _, receivedMsg := range receivedMsgs {
-			if sentMsg == receivedMsg {
-				found = true
-				break
-			}
-		}
-		if !found {
-			missing = append(missing, sentMsg)
-		}
-	}
-	return missing
-}
-
-func randomInt(lower int, higher int) int {
-	rand.Seed(uint64(time.Now().UnixNano()))
-	return rand.Intn(higher-lower+1) + lower
 }

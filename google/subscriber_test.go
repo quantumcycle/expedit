@@ -3,12 +3,13 @@ package google_test
 import (
 	"cloud.google.com/go/pubsub"
 	"context"
-	. "github.com/onsi/ginkgo/v2"
+	"testing"
+	"time"
+
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/google"
 	"github.com/quantumcycle/expedit/google/emulator"
-	"time"
 )
 
 func asyncCountMessages(count *int, ch <-chan *message.Message, duration time.Duration) {
@@ -26,52 +27,71 @@ func asyncCountMessages(count *int, ch <-chan *message.Message, duration time.Du
 	}()
 }
 
-var _ = Describe("Google Subscriber", func() {
-	var client *pubsub.Client
-	var emuClient *emulator.PubsubTestClient
-	var topic *emulator.TestTopic
+type googleSubscriberTestSetup struct {
+	client    *pubsub.Client
+	emuClient *emulator.PubsubTestClient
+	topic     *emulator.TestTopic
+}
 
-	BeforeEach(func() {
-		ctx := context.Background()
-		emuClient = emulator.NewTestClient(ctx, "test-project")
-		topic = emuClient.CreateTestTopic(ctx, "test-topic")
+func setupGoogleSubscriber(t *testing.T) *googleSubscriberTestSetup {
+	// Set the emulator host for Google PubSub
+	t.Setenv("PUBSUB_EMULATOR_HOST", "localhost:29085")
+	
+	ctx := context.Background()
+	emuClient := emulator.NewTestClient(ctx, "test-project")
+	topic := emuClient.CreateTestTopic(ctx, "test-topic")
 
-		var err error
-		client, err = pubsub.NewClient(context.Background(), "test-project")
-		Expect(err).NotTo(HaveOccurred())
+	client, err := pubsub.NewClient(context.Background(), "test-project")
+	if err != nil {
+		t.Fatalf("failed to create pubsub client: %v", err)
+	}
+
+	t.Cleanup(func() {
+		client.Close()
 	})
 
-	It("should return an error if the client is missing", func() {
-		_, err := google.NewGoogleSubscriber(nil,
-			"test-subscription")
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("client is required"))
+	return &googleSubscriberTestSetup{
+		client:    client,
+		emuClient: emuClient,
+		topic:     topic,
+	}
+}
+
+func TestGoogleSubscriber(t *testing.T) {
+	t.Run("should return an error if the client is missing", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+
+		_, err := google.NewGoogleSubscriber(nil, "test-subscription")
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err).To(MatchError("client is required"))
 	})
 
-	It("should return an error if the subscription doesnt exist", func() {
+	t.Run("should return an error if the subscription doesnt exist", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupGoogleSubscriber(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		subscriber, err := google.NewGoogleSubscriber(client,
-			"non-existing-subscription")
-		Expect(err).NotTo(HaveOccurred())
+		subscriber, err := google.NewGoogleSubscriber(setup.client, "non-existing-subscription")
+		g.Expect(err).NotTo(HaveOccurred())
 
 		_, err = subscriber.Subscribe(ctx)
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("subscription does not exist"))
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err).To(MatchError("subscription does not exist"))
 	})
 
-	It("should receives all messages sent to the subscription", func() {
+	t.Run("should receives all messages sent to the subscription", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupGoogleSubscriber(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+		subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-		subscriber, err := google.NewGoogleSubscriber(client,
-			subscription.Name)
-		Expect(err).NotTo(HaveOccurred())
+		subscriber, err := google.NewGoogleSubscriber(setup.client, subscription.Name)
+		g.Expect(err).NotTo(HaveOccurred())
 
 		msgCh, err := subscriber.Subscribe(ctx)
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 		defer subscriber.Close()
 
 		msgCount := 0
@@ -79,25 +99,27 @@ var _ = Describe("Google Subscriber", func() {
 
 		expectedMsgCount := 10
 		for i := 0; i < expectedMsgCount; i++ {
-			topic.PublishBytes(ctx, []byte("payload"), nil)
+			setup.topic.PublishBytes(ctx, []byte("payload"), nil)
 		}
-		Eventually(func() int {
+		g.Eventually(func() int {
 			return msgCount
 		}, 3*time.Second).Should(Equal(expectedMsgCount))
 	})
 
-	When("parse attributes is enabled", func() {
-		It("should convert bool", func() {
+	t.Run("when parse attributes is enabled", func(t *testing.T) {
+		t.Run("should convert bool", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupGoogleSubscriber(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+			subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-			subscriber, err := google.NewGoogleSubscriber(client,
+			subscriber, err := google.NewGoogleSubscriber(setup.client,
 				subscription.Name, google.WithParseAttributes(true))
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 
 			msgCh, err := subscriber.Subscribe(ctx)
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
 			var att1Val interface{}
@@ -117,28 +139,28 @@ var _ = Describe("Google Subscriber", func() {
 
 			attrs := make(map[string]string)
 			attrs["att1"] = "true"
-			topic.PublishBytes(ctx, []byte("payload"), attrs)
+			setup.topic.PublishBytes(ctx, []byte("payload"), attrs)
 
-			//Wait for the message to be processed
-			Eventually(func() interface{} {
+			g.Eventually(func() interface{} {
 				return att1Val
 			}).Should(Not(BeNil()))
 
-			//Check that we have true as boolean and not string
-			Expect(att1Val).To(Equal(true))
+			g.Expect(att1Val).To(Equal(true))
 		})
 
-		It("should convert float", func() {
+		t.Run("should convert float", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupGoogleSubscriber(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+			subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-			subscriber, err := google.NewGoogleSubscriber(client,
+			subscriber, err := google.NewGoogleSubscriber(setup.client,
 				subscription.Name, google.WithParseAttributes(true))
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 
 			msgCh, err := subscriber.Subscribe(ctx)
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
 			var att1Val interface{}
@@ -158,28 +180,28 @@ var _ = Describe("Google Subscriber", func() {
 
 			attrs := make(map[string]string)
 			attrs["att1"] = "10.231"
-			topic.PublishBytes(ctx, []byte("payload"), attrs)
+			setup.topic.PublishBytes(ctx, []byte("payload"), attrs)
 
-			//Wait for the message to be processed
-			Eventually(func() interface{} {
+			g.Eventually(func() interface{} {
 				return att1Val
 			}).Should(Not(BeNil()))
 
-			//Check that we have true as float and not string
-			Expect(att1Val).To(Equal(10.231))
+			g.Expect(att1Val).To(Equal(10.231))
 		})
 
-		It("should convert integer", func() {
+		t.Run("should convert integer", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupGoogleSubscriber(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+			subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-			subscriber, err := google.NewGoogleSubscriber(client,
+			subscriber, err := google.NewGoogleSubscriber(setup.client,
 				subscription.Name, google.WithParseAttributes(true))
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 
 			msgCh, err := subscriber.Subscribe(ctx)
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
 			var att1Val interface{}
@@ -199,28 +221,28 @@ var _ = Describe("Google Subscriber", func() {
 
 			attrs := make(map[string]string)
 			attrs["att1"] = "10"
-			topic.PublishBytes(ctx, []byte("payload"), attrs)
+			setup.topic.PublishBytes(ctx, []byte("payload"), attrs)
 
-			//Wait for the message to be processed
-			Eventually(func() interface{} {
+			g.Eventually(func() interface{} {
 				return att1Val
 			}).Should(Not(BeNil()))
 
-			//Check that we have true as int and not string
-			Expect(att1Val).To(Equal(int64(10)))
+			g.Expect(att1Val).To(Equal(int64(10)))
 		})
 
-		It("should keep string as is", func() {
+		t.Run("should keep string as is", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupGoogleSubscriber(t)
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+			subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-			subscriber, err := google.NewGoogleSubscriber(client,
+			subscriber, err := google.NewGoogleSubscriber(setup.client,
 				subscription.Name, google.WithParseAttributes(true))
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 
 			msgCh, err := subscriber.Subscribe(ctx)
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
 			var att1Val interface{}
@@ -240,38 +262,36 @@ var _ = Describe("Google Subscriber", func() {
 
 			attrs := make(map[string]string)
 			attrs["att1"] = "hello"
-			topic.PublishBytes(ctx, []byte("payload"), attrs)
+			setup.topic.PublishBytes(ctx, []byte("payload"), attrs)
 
-			//Wait for the message to be processed
-			Eventually(func() interface{} {
+			g.Eventually(func() interface{} {
 				return att1Val
 			}).Should(Not(BeNil()))
 
-			//Check that we have true as int and not string
-			Expect(att1Val).To(Equal("hello"))
+			g.Expect(att1Val).To(Equal("hello"))
 		})
 	})
 
-	It("should nack messages that are not ack/nacked after the processing timeout", func() {
-		//We cannot query the emulator to see if the message was nacked, so the next best thing is to check if the
-		//event handler was called.
+	t.Run("should nack messages that are not ack/nacked after the processing timeout", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupGoogleSubscriber(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+		subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
 		timeoutOccurred := false
-		subscriber, err := google.NewGoogleSubscriber(client,
+		subscriber, err := google.NewGoogleSubscriber(setup.client,
 			subscription.Name,
 			google.WithProcessingTimeout(1*time.Second),
 			google.WithProcessingTimeoutHandler(func(ctx context.Context, msg *pubsub.Message) {
 				timeoutOccurred = true
 			}))
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 
 		nackOccurred := false
 		msgCh, err := subscriber.Subscribe(ctx)
 		defer subscriber.Close()
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 		go func() {
 			for {
 				select {
@@ -289,27 +309,26 @@ var _ = Describe("Google Subscriber", func() {
 			}
 		}()
 
-		topic.PublishBytes(ctx, []byte("payload"), nil)
+		setup.topic.PublishBytes(ctx, []byte("payload"), nil)
 
-		Eventually(func() bool {
+		g.Eventually(func() bool {
 			return timeoutOccurred && nackOccurred
 		}, 5*time.Second).Should(Equal(true))
 	})
 
-	It("should receive the message ids that were published", func() {
-		//We cannot query the emulator to see if the message was nacked, so the next best thing is to check if the
-		//event handler was called.
+	t.Run("should receive the message ids that were published", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupGoogleSubscriber(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+		subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-		subscriber, err := google.NewGoogleSubscriber(client,
-			subscription.Name)
-		Expect(err).NotTo(HaveOccurred())
+		subscriber, err := google.NewGoogleSubscriber(setup.client, subscription.Name)
+		g.Expect(err).NotTo(HaveOccurred())
 
 		msgCh, err := subscriber.Subscribe(ctx)
 		defer subscriber.Close()
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 
 		idReceived := make(map[string]bool)
 		go func() {
@@ -328,11 +347,11 @@ var _ = Describe("Google Subscriber", func() {
 
 		expectedIds := make([]string, 0, 10)
 		for i := 0; i < 10; i++ {
-			id := topic.PublishBytes(ctx, []byte("payload"), nil)
+			id := setup.topic.PublishBytes(ctx, []byte("payload"), nil)
 			expectedIds = append(expectedIds, id)
 		}
 
-		Eventually(func() []string {
+		g.Eventually(func() []string {
 			keys := make([]string, 0, len(idReceived))
 			for k := range idReceived {
 				keys = append(keys, k)
@@ -341,22 +360,21 @@ var _ = Describe("Google Subscriber", func() {
 		}, 5*time.Second).Should(ContainElements(expectedIds))
 	})
 
-	It("should relay the ack or nack to gcp messages", func() {
+	t.Run("should relay the ack or nack to gcp messages", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupGoogleSubscriber(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+		subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-		subscriber, err := google.NewGoogleSubscriber(client,
-			subscription.Name)
+		subscriber, err := google.NewGoogleSubscriber(setup.client, subscription.Name)
 		defer subscriber.Close()
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 
-		//We're sending 100 messages
-		//All messages will be acked, except the first one, which will be nacked and retried
 		nackDone := false
 		processCount := 0
 		msgCh, err := subscriber.Subscribe(ctx)
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 		go func() {
 			for {
 				select {
@@ -379,28 +397,29 @@ var _ = Describe("Google Subscriber", func() {
 
 		nbMsg := 100
 		for i := 0; i < nbMsg; i++ {
-			topic.PublishBytes(ctx, []byte("payload1"), nil)
+			setup.topic.PublishBytes(ctx, []byte("payload1"), nil)
 		}
 
-		Eventually(func() int {
+		g.Eventually(func() int {
 			return processCount
 		}, 5*time.Second).Should(Equal(nbMsg + 1))
 	})
 
-	It("should cancel message context once the processing is done", func() {
+	t.Run("should cancel message context once the processing is done", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupGoogleSubscriber(t)
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		subscription := topic.CreateTestSubscription(ctx, "test-subscription", false)
+		subscription := setup.topic.CreateTestSubscription(ctx, "test-subscription", false)
 
-		subscriber, err := google.NewGoogleSubscriber(client,
-			subscription.Name)
-		Expect(err).NotTo(HaveOccurred())
+		subscriber, err := google.NewGoogleSubscriber(setup.client, subscription.Name)
+		g.Expect(err).NotTo(HaveOccurred())
 
 		msgCh, err := subscriber.Subscribe(ctx)
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 		defer subscriber.Close()
 
-		topic.PublishBytes(ctx, []byte("payload"), nil)
+		setup.topic.PublishBytes(ctx, []byte("payload"), nil)
 
 		processCount := 0
 		waitCh := make(chan bool)
@@ -416,14 +435,13 @@ var _ = Describe("Google Subscriber", func() {
 					msgCtxDone := msg.Context().Done()
 					msg.Ack()
 					processCount++
-					Eventually(msgCtxDone, 3*time.Second).Should(BeClosed())
+					g.Eventually(msgCtxDone, 3*time.Second).Should(BeClosed())
 					waitCh <- true
 				}
 			}
 		}()
 		<-waitCh
 
-		//Failsafe to make sure we asserted on the message context once
-		Expect(processCount).To(Equal(1))
+		g.Expect(processCount).To(Equal(1))
 	})
-})
+}
