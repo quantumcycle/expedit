@@ -3,15 +3,16 @@ package amqp_test
 import (
 	"context"
 	"fmt"
-	. "github.com/onsi/ginkgo/v2"
+	"math/rand/v2"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/amqp"
 	"github.com/quantumcycle/expedit/amqp/testrabbit"
 	amqpgo "github.com/rabbitmq/amqp091-go"
-	"math/rand/v2"
-	"sync"
-	"sync/atomic"
-	"time"
 )
 
 // createLoadTestConnection creates a dedicated connection for load testing
@@ -66,31 +67,39 @@ func createLoadTestConnection() (*amqp.ReconnectingConnection, *amqp.Reconnectin
 	return conn, channel, nil
 }
 
-// Load test scenario for AMQP
-
-var _ = Describe("AMQP load test", Ordered, func() {
-	var conn *amqp.ReconnectingConnection
-	var channel *amqp.ReconnectingChannel
-	var queues []testrabbit.DirectQueue
-
-	BeforeEach(func() {
-		var err error
-		// Use the improved connection helper
-		conn, channel, err = createLoadTestConnection()
-		if err != nil {
-			panic(err)
+func findDuplicateMessages(msgs1 []string, msgs2 []string) []string {
+	duplicates := []string{}
+	for _, msg1 := range msgs1 {
+		for _, msg2 := range msgs2 {
+			if msg1 == msg2 {
+				duplicates = append(duplicates, msg1)
+			}
 		}
+	}
+	return duplicates
+}
 
-		queues = []testrabbit.DirectQueue{}
+func randomInt(lower int, higher int) int {
+	return rand.IntN(higher-lower+1) + lower
+}
 
-		// Create fewer queues to reduce complexity and potential race conditions
-		for i := 0; i < 3; i++ {
-			queue := testrabbit.CreateDirectExchangeQueue(channel, fmt.Sprintf("load-test-queue-%d", i+1))
-			queues = append(queues, queue)
-		}
-	})
+func setupAMQPLoadTest(t *testing.T) (*amqp.ReconnectingConnection, *amqp.ReconnectingChannel, []testrabbit.DirectQueue) {
+	var err error
+	// Use the improved connection helper
+	conn, channel, err := createLoadTestConnection()
+	if err != nil {
+		t.Fatalf("failed to create connection: %v", err)
+	}
 
-	AfterEach(func() {
+	queues := []testrabbit.DirectQueue{}
+
+	// Create fewer queues to reduce complexity and potential race conditions
+	for i := 0; i < 3; i++ {
+		queue := testrabbit.CreateDirectExchangeQueue(channel, fmt.Sprintf("load-test-queue-%d", i+1))
+		queues = append(queues, queue)
+	}
+
+	t.Cleanup(func() {
 		// Clean up queues
 		for _, queue := range queues {
 			queue.Delete()
@@ -99,7 +108,14 @@ var _ = Describe("AMQP load test", Ordered, func() {
 		conn.Close()
 	})
 
-	It("should process all messages at scale with multiple publishers and consumers", func() {
+	return conn, channel, queues
+}
+
+func TestAMQPLoadTest(t *testing.T) {
+	t.Run("should process all messages at scale with multiple publishers and consumers", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		conn, _, queues := setupAMQPLoadTest(t)
+
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
 
@@ -121,13 +137,13 @@ var _ = Describe("AMQP load test", Ordered, func() {
 			for j := 0; j < 2; j++ {
 				// Create individual channel for each consumer to avoid conflicts
 				consumerChannel, err := conn.Channel()
-				Expect(err).NotTo(HaveOccurred())
+				g.Expect(err).NotTo(HaveOccurred())
 
 				subscriber, err := amqp.NewAMQPSubscriber(consumerChannel, queue.QueueName)
-				Expect(err).NotTo(HaveOccurred())
+				g.Expect(err).NotTo(HaveOccurred())
 
 				msgCh, err := subscriber.Subscribe(ctx)
-				Expect(err).NotTo(HaveOccurred())
+				g.Expect(err).NotTo(HaveOccurred())
 
 				go func(consumerIndex int, queueIndex int, queueName string, consumerChannel *amqp.ReconnectingChannel) {
 					defer func() {
@@ -179,7 +195,7 @@ var _ = Describe("AMQP load test", Ordered, func() {
 			case <-consumerReady:
 				// Consumer is ready
 			case <-time.After(5 * time.Second):
-				Fail(fmt.Sprintf("Timeout waiting for consumer %d to be ready", i+1))
+				t.Fatalf("Timeout waiting for consumer %d to be ready", i+1)
 			}
 		}
 		// Give a little extra time for consumers to fully establish
@@ -236,7 +252,7 @@ var _ = Describe("AMQP load test", Ordered, func() {
 
 		// Wait for processing to complete - we expect close to totalExpectedMessages
 		// but some messages might be nacked and not requeued
-		Eventually(func() bool {
+		g.Eventually(func() bool {
 			processed := atomic.LoadInt64(&totalProcessedCount)
 			nacked := atomic.LoadInt64(&nackCount)
 			sent := atomic.LoadInt64(&totalSentCount)
@@ -250,7 +266,7 @@ var _ = Describe("AMQP load test", Ordered, func() {
 			atomic.LoadInt64(&totalProcessedCount)+atomic.LoadInt64(&nackCount), atomic.LoadInt64(&totalSentCount))
 
 		// Should have some random nacks due to simulated errors (0.5% rate may result in 0-3 nacks)
-		Expect(nackCount).To(BeNumerically(">=", int64(0)), "Expected 0 or more messages to be nacked due to simulated errors")
+		g.Expect(nackCount).To(BeNumerically(">=", int64(0)), "Expected 0 or more messages to be nacked due to simulated errors")
 
 		// Verify message distribution across consumers
 		// Each queue should have received close to nbMessagesToSendPerQueue messages (accounting for nacks)
@@ -263,30 +279,14 @@ var _ = Describe("AMQP load test", Ordered, func() {
 
 			totalMsgsForQueue := len(consumer1Msgs) + len(consumer2Msgs)
 			// Allow for variance due to nacked messages and load test timing
-			expectedMinMessages := nbMessagesToSendPerQueue - 5  // Allow for up to 5 messages to be lost/nacked
-			Expect(totalMsgsForQueue).To(BeNumerically(">=", expectedMinMessages),
+			expectedMinMessages := nbMessagesToSendPerQueue - 5 // Allow for up to 5 messages to be lost/nacked
+			g.Expect(totalMsgsForQueue).To(BeNumerically(">=", expectedMinMessages),
 				"Queue %d should have received close to %d messages, but got %d (consumer1: %d, consumer2: %d)",
 				queueIndex, nbMessagesToSendPerQueue, totalMsgsForQueue, len(consumer1Msgs), len(consumer2Msgs))
 
 			// Verify no message duplication between consumers
 			duplicates := findDuplicateMessages(consumer1Msgs, consumer2Msgs)
-			Expect(duplicates).To(BeEmpty(), "Found duplicate messages between consumers for queue %d: %v", queueIndex, duplicates)
+			g.Expect(duplicates).To(BeEmpty(), "Found duplicate messages between consumers for queue %d: %v", queueIndex, duplicates)
 		}
 	})
-})
-
-func findDuplicateMessages(msgs1 []string, msgs2 []string) []string {
-	duplicates := []string{}
-	for _, msg1 := range msgs1 {
-		for _, msg2 := range msgs2 {
-			if msg1 == msg2 {
-				duplicates = append(duplicates, msg1)
-			}
-		}
-	}
-	return duplicates
-}
-
-func randomInt(lower int, higher int) int {
-	return rand.IntN(higher-lower+1) + lower
 }

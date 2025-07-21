@@ -2,18 +2,19 @@ package redis_test
 
 import (
 	"context"
+	"testing"
+	"time"
+
 	"github.com/lithammer/shortuuid/v3"
-	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
 	rpub "github.com/quantumcycle/expedit/redis"
 	"github.com/redis/go-redis/v9"
-	"time"
 )
 
-func ExpectNbMessages(client *redis.Client, stream string, nb int64, timeout time.Duration) {
-	Eventually(func() int64 {
+func expectNbMessages(g Gomega, client *redis.Client, stream string, nb int64, timeout time.Duration) {
+	g.Eventually(func() int64 {
 		v, err := client.XLen(context.Background(), stream).Result()
 		if err != nil {
 			panic(err)
@@ -22,7 +23,7 @@ func ExpectNbMessages(client *redis.Client, stream string, nb int64, timeout tim
 	}, timeout).Should(Equal(nb))
 }
 
-func SimpleMarshaller(msg *message.Message) map[string]interface{} {
+func simpleMarshaller(msg *message.Message) map[string]interface{} {
 	values := make(map[string]interface{})
 	for k, v := range msg.Metadata {
 		values[k] = v
@@ -36,42 +37,62 @@ func SimpleMarshaller(msg *message.Message) map[string]interface{} {
 	panic("payload must be map[string]interface{}")
 }
 
-var testStream = publisher.Destination("test-stream")
+type redisPublisherTestSetup struct {
+	client *redis.Client
+}
 
-var _ = Describe("Redis Publisher", Ordered, func() {
-	var client *redis.Client
-
-	BeforeAll(func() {
-		client = redis.NewClient(&redis.Options{
-			Addr: "localhost:29379",
-		})
+func setupRedisPublisher(t *testing.T) *redisPublisherTestSetup {
+	client := redis.NewClient(&redis.Options{
+		Addr: "localhost:29379",
 	})
 
-	It("should return an error if the client is missing", func() {
+	t.Cleanup(func() {
+		client.Close()
+	})
+
+	return &redisPublisherTestSetup{
+		client: client,
+	}
+}
+
+func TestRedisPublisher(t *testing.T) {
+	t.Run("should return an error if the client is missing", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		testStream := publisher.Destination("test-stream")
+
 		_, err := rpub.NewRedisPublisher(nil,
 			publisher.ConstantDestination(testStream),
-			SimpleMarshaller)
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("client is required"))
+			simpleMarshaller)
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err).To(MatchError("client is required"))
 	})
 
-	It("should return an error if the routing function is missing", func() {
-		_, err := rpub.NewRedisPublisher(client,
+	t.Run("should return an error if the routing function is missing", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupRedisPublisher(t)
+
+		_, err := rpub.NewRedisPublisher(setup.client,
 			nil,
-			SimpleMarshaller)
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("routing function is required"))
+			simpleMarshaller)
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err).To(MatchError("routing function is required"))
 	})
 
-	It("should return an error if the marshaller is missing", func() {
-		_, err := rpub.NewRedisPublisher(client,
+	t.Run("should return an error if the marshaller is missing", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupRedisPublisher(t)
+		testStream := publisher.Destination("test-stream")
+
+		_, err := rpub.NewRedisPublisher(setup.client,
 			publisher.ConstantDestination(testStream),
 			nil)
-		Expect(err).To(HaveOccurred())
-		Expect(err).To(MatchError("payloadMarshaller is required"))
+		g.Expect(err).To(HaveOccurred())
+		g.Expect(err).To(MatchError("payloadMarshaller is required"))
 	})
 
-	It("should use the routing function to determine the target stream", func() {
+	t.Run("should use the routing function to determine the target stream", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupRedisPublisher(t)
 		stream1 := publisher.Destination("stream-1-" + shortuuid.New())
 		stream2 := publisher.Destination("stream-2-" + shortuuid.New())
 
@@ -81,30 +102,34 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 			}
 			return stream1, nil
 		}
-		pub, err := rpub.NewRedisPublisher(client,
+		pub, err := rpub.NewRedisPublisher(setup.client,
 			routingFn,
-			SimpleMarshaller)
+			simpleMarshaller)
+		g.Expect(err).NotTo(HaveOccurred())
 
 		pubEngine := publisher.NewPublishingEngine(pub)
 		err = pubEngine.Publish(message.NewMessage(context.Background(), map[string]interface{}{
 			"key": "value1",
 		}).WithMetadata("destination", "stream2"))
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 		err = pubEngine.Publish(message.NewMessage(context.Background(), map[string]interface{}{
 			"key": "value2",
 		}))
-		Expect(err).NotTo(HaveOccurred())
+		g.Expect(err).NotTo(HaveOccurred())
 
-		ExpectNbMessages(client, string(stream1), 1, 1*time.Second)
-		ExpectNbMessages(client, string(stream2), 1, 1*time.Second)
+		expectNbMessages(g, setup.client, string(stream1), 1, 1*time.Second)
+		expectNbMessages(g, setup.client, string(stream2), 1, 1*time.Second)
 	})
 
-	It("should send all the messages", func() {
+	t.Run("should send all the messages", func(t *testing.T) {
+		g := NewGomegaWithT(t)
+		setup := setupRedisPublisher(t)
 		stream := publisher.Destination("stream-" + shortuuid.New())
 		routingFn := publisher.ConstantDestination(stream)
-		pub, err := rpub.NewRedisPublisher(client,
+		pub, err := rpub.NewRedisPublisher(setup.client,
 			routingFn,
-			SimpleMarshaller)
+			simpleMarshaller)
+		g.Expect(err).NotTo(HaveOccurred())
 
 		pubEngine := publisher.NewPublishingEngine(pub)
 		expectedMessages := 10
@@ -113,10 +138,9 @@ var _ = Describe("Redis Publisher", Ordered, func() {
 				map[string]interface{}{
 					"key": "value",
 				}))
-			Expect(err).NotTo(HaveOccurred())
+			g.Expect(err).NotTo(HaveOccurred())
 		}
 
-		ExpectNbMessages(client, string(stream), int64(expectedMessages), 5*time.Second)
-
+		expectNbMessages(g, setup.client, string(stream), int64(expectedMessages), 5*time.Second)
 	})
-})
+}
