@@ -2,6 +2,7 @@ package redis_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -142,5 +143,140 @@ func TestRedisPublisher(t *testing.T) {
 		}
 
 		expectNbMessages(g, setup.client, string(stream), int64(expectedMessages), 5*time.Second)
+	})
+
+	t.Run("configuration options", func(t *testing.T) {
+		t.Run("WithIDGenerator should use custom ID generation", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupRedisPublisher(t)
+			stream := publisher.Destination("test-stream-" + shortuuid.New())
+
+			// Redis stream IDs must be in format timestamp-sequence
+			customID := fmt.Sprintf("%d-0", time.Now().UnixMilli())
+			idGenerator := func(msg *message.Message) (string, error) {
+				return customID, nil
+			}
+
+			pub, err := rpub.NewRedisPublisher(setup.client,
+				publisher.ConstantDestination(stream),
+				simpleMarshaller,
+				rpub.WithIDGenerator(idGenerator))
+			g.Expect(err).NotTo(HaveOccurred())
+
+			pubEngine := publisher.NewPublishingEngine(pub)
+			msg := message.NewMessage(context.Background(), map[string]interface{}{"test": "value"})
+			err = pubEngine.Publish(msg)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Verify the message was published with custom ID
+			messages, err := setup.client.XRead(context.Background(), &redis.XReadArgs{
+				Streams: []string{string(stream), "0"},
+			}).Result()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(messages).To(HaveLen(1))
+			g.Expect(messages[0].Messages).To(HaveLen(1))
+			g.Expect(messages[0].Messages[0].ID).To(Equal(customID))
+		})
+
+		t.Run("WithMaxlen should configure maxlen option", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupRedisPublisher(t)
+			stream := publisher.Destination("test-stream-" + shortuuid.New())
+
+			// Test that WithMaxlen option is accepted without error
+			pub, err := rpub.NewRedisPublisher(setup.client,
+				publisher.ConstantDestination(stream),
+				simpleMarshaller,
+				rpub.WithMaxlen(3))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(pub).NotTo(BeNil())
+
+			pubEngine := publisher.NewPublishingEngine(pub)
+			msg := message.NewMessage(context.Background(), map[string]interface{}{"test": "value"})
+			err = pubEngine.Publish(msg)
+			g.Expect(err).NotTo(HaveOccurred())
+		})
+
+		t.Run("WithApprox should configure approx option", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupRedisPublisher(t)
+			stream := publisher.Destination("test-stream-" + shortuuid.New())
+
+			// Test that WithApprox option is accepted without error
+			pub, err := rpub.NewRedisPublisher(setup.client,
+				publisher.ConstantDestination(stream),
+				simpleMarshaller,
+				rpub.WithMaxlen(2),
+				rpub.WithApprox(true))
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(pub).NotTo(BeNil())
+
+			pubEngine := publisher.NewPublishingEngine(pub)
+			msg := message.NewMessage(context.Background(), map[string]interface{}{"test": "value"})
+			err = pubEngine.Publish(msg)
+			g.Expect(err).NotTo(HaveOccurred())
+		})
+
+		t.Run("WithMetadataMarshaller should transform metadata", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupRedisPublisher(t)
+			stream := publisher.Destination("test-stream-" + shortuuid.New())
+
+			customMarshaller := func(msg *message.Message) map[string]interface{} {
+				values := make(map[string]interface{})
+				for k, v := range msg.Metadata {
+					values["meta_"+k] = v
+				}
+				return values
+			}
+
+			pub, err := rpub.NewRedisPublisher(setup.client,
+				publisher.ConstantDestination(stream),
+				simpleMarshaller,
+				rpub.WithMetadataMarshaller(customMarshaller))
+			g.Expect(err).NotTo(HaveOccurred())
+
+			pubEngine := publisher.NewPublishingEngine(pub)
+			msg := message.NewMessage(context.Background(), map[string]interface{}{"test": "value"})
+			msg = msg.WithMetadata("user", "john").WithMetadata("action", "login")
+			
+			err = pubEngine.Publish(msg)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Verify metadata was transformed with prefix
+			messages, err := setup.client.XRead(context.Background(), &redis.XReadArgs{
+				Streams: []string{string(stream), "0"},
+			}).Result()
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(messages).To(HaveLen(1))
+			g.Expect(messages[0].Messages).To(HaveLen(1))
+			
+			values := messages[0].Messages[0].Values
+			g.Expect(values).To(HaveKey("meta_user"))
+			g.Expect(values).To(HaveKey("meta_action"))
+			g.Expect(values["meta_user"]).To(Equal("john"))
+			g.Expect(values["meta_action"]).To(Equal("login"))
+		})
+
+		t.Run("should handle nil metadata marshaller gracefully", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupRedisPublisher(t)
+			stream := publisher.Destination("test-stream-" + shortuuid.New())
+
+			pub, err := rpub.NewRedisPublisher(setup.client,
+				publisher.ConstantDestination(stream),
+				simpleMarshaller,
+				rpub.WithMetadataMarshaller(nil))
+			g.Expect(err).NotTo(HaveOccurred())
+
+			pubEngine := publisher.NewPublishingEngine(pub)
+			msg := message.NewMessage(context.Background(), map[string]interface{}{"test": "value"})
+			msg = msg.WithMetadata("user", "john")
+			
+			err = pubEngine.Publish(msg)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			expectNbMessages(g, setup.client, string(stream), 1, 2*time.Second)
+		})
 	})
 }
