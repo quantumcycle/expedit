@@ -15,11 +15,19 @@ func UnmarshallMapPayloadFromJson[T any](mapKey string, payloadType T) middlewar
 				return fmt.Errorf("payload is not a map[string]interface{}")
 			}
 			payload := new(T)
-			payloadKey := msg.Payload.(map[string]interface{})[mapKey]
+			payloadKey, exists := msg.Payload.(map[string]interface{})[mapKey]
+			if !exists {
+				return fmt.Errorf("payload key %s not found in message", mapKey)
+			}
 			_, okByte := payloadKey.([]byte)
 			_, okString := payloadKey.(string)
 			if !okByte && !okString {
-				keyType := reflect.TypeOf(payloadKey).Name()
+				var keyType string
+				if payloadKey == nil {
+					keyType = "nil"
+				} else {
+					keyType = reflect.TypeOf(payloadKey).Name()
+				}
 				return fmt.Errorf("payload key %s is of type [%s]. It must be either a byte array or string",
 					mapKey, keyType)
 			}

@@ -26,17 +26,35 @@ go get -u github.com/quantumcycle/expedit/amqp
 
 Check the code in the [example](example/main.go) folder for a working example.
 
+## Documentation
+
+### 📋 Usage Patterns and Best Practices
+
+- **[📖 Universal Messaging Patterns](MESSAGING_PATTERNS.md)** - Patterns that work across all implementations
+  - Middleware chains, error handling, batching, circuit breakers, and more
+  - Works with Google Pub/Sub, Redis, AMQP, and Go channels
+
+- **[🏷️ Google Pub/Sub Patterns](google/USAGE_PATTERNS.md)** - Google-specific patterns
+  - Ordering keys, attributes, emulator testing, and Google-specific optimizations
+
+- **[🏷️ Redis stream Patterns](redis/USAGE_PATTERNS.md)** - Redis-specific patterns
+  - Consumer groups, pending messages recovery, stream size management, JSON serialization and Redis-specific optimizations
+
+- **[📁 Examples](examples/)** - Complete working examples for each implementation
+  - Production-ready code with middleware, metrics, and error handling
+
+
 ## Supported implementations
 
-| Impl              | Status  | Notes                                     |
-|-------------------|:-------:|-------------------------------------------|
-| Golang channel    |  Beta   | Publisher and subscriber written          |
-| Google GCP Pubsub |  Beta   | Publisher and subscriber written          |
-| Redis stream      |  Alpha  | Some corner cases to address, like XCLAIM |
-| Kafka             | Planned |                                           |
-| Amazon SNS        | Planned |                                           |
-| Amazon SQS        | Planned |                                           |
+| Impl              | Status  | Notes                                                        |
+|-------------------|:-------:|--------------------------------------------------------------|
+| Golang channel    |  Beta   | Publisher and subscriber written                             |
+| Google GCP Pubsub |  Beta   | Publisher and subscriber written                             |
+| Redis stream      |  Beta   | Publisher and subscriber written                             |
 | AMQP (Rabbit MQ)  |  Beta   | Publisher, subscriber, examples, and load tests implemented. |
+| Kafka             | Planned |                                                              |
+| Amazon SNS        | Planned |                                                              |
+| Amazon SQS        | Planned |                                                              |
 
 ## Definitions
 

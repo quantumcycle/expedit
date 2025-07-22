@@ -27,6 +27,8 @@ type SubscriberOptions struct {
 	processingTimeout                  time.Duration
 	metadataExtractor                  func(wrapper MessageWrapper) map[string]interface{}
 	payloadExtractor                   func(wrapper MessageWrapper) map[string]interface{}
+	pendingMessageIdleTimeout          time.Duration
+	pendingMessageBatchSize            int
 }
 
 // WithProcessingTimeoutHandler takes a function that is called when a message processing times out.
@@ -94,6 +96,22 @@ func WithPayloadExtractor(extractor func(wrapper MessageWrapper) map[string]inte
 	}
 }
 
+// WithPendingMessageIdleTimeout sets how long a message must be idle before it can be claimed by another consumer.
+// Default is 5 minutes. Only applies to consumer group mode.
+func WithPendingMessageIdleTimeout(timeout time.Duration) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.pendingMessageIdleTimeout = timeout
+	}
+}
+
+// WithPendingMessageBatchSize sets the maximum number of pending messages to check and claim per cycle.
+// Default is 10. Only applies to consumer group mode.
+func WithPendingMessageBatchSize(batchSize int) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.pendingMessageBatchSize = batchSize
+	}
+}
+
 type Subscriber struct {
 	internalSubscriber *subscriber.MessageSubscriber[*pubsub.Message]
 }
@@ -123,9 +141,11 @@ func NewRedisSubscriber(
 	}
 
 	options := &SubscriberOptions{
-		processingTimeout:    600 * time.Second,
-		consumerGroupStartID: StartFromLatest,
-		startID:              StartFromLatest,
+		processingTimeout:         600 * time.Second,
+		consumerGroupStartID:      StartFromLatest,
+		startID:                   StartFromLatest,
+		pendingMessageIdleTimeout: 5 * time.Minute,
+		pendingMessageBatchSize:   10,
 	}
 
 	for _, opt := range opts {
@@ -139,7 +159,14 @@ func NewRedisSubscriber(
 			return err
 		},
 		Nack: func(ctx context.Context, wrapper MessageWrapper) error {
-			//TODO: see the XCLAIM comment above
+			// Only apply XCLAIM in consumer group mode
+			if wrapper.consumerGroup == "" {
+				return nil
+			}
+
+			// For now, just return nil - the pending message recovery will handle redistribution
+			// Alternative approach: we could use XCLAIM to transfer to a specific consumer,
+			// but simply leaving it pending allows any consumer to claim it via the pending recovery mechanism
 			return nil
 		},
 		MessageUnmarshall: func(ctx context.Context, wrapper MessageWrapper) *message.Message {
@@ -189,6 +216,43 @@ func NewRedisSubscriber(
 					var entries []redis.XStream
 
 					if options.consumerGroup != "" {
+						// Check for pending messages and claim them before reading new ones
+						pendingEntries, pendingErr := c.XPendingExt(ctx, &redis.XPendingExtArgs{
+							Stream: stream,
+							Group:  options.consumerGroup,
+							Start:  "-",
+							End:    "+",
+							Count:  int64(options.pendingMessageBatchSize),
+							Idle:   options.pendingMessageIdleTimeout,
+						}).Result()
+
+						if pendingErr == nil && len(pendingEntries) > 0 {
+							// Try to claim all pending messages
+							var messageIDs []string
+							for _, pending := range pendingEntries {
+								messageIDs = append(messageIDs, pending.ID)
+							}
+
+							claimedMsgs, claimErr := c.XClaim(ctx, &redis.XClaimArgs{
+								Stream:   stream,
+								Group:    options.consumerGroup,
+								Consumer: uniqueID,
+								MinIdle:  options.pendingMessageIdleTimeout,
+								Messages: messageIDs,
+							}).Result()
+
+							// Process successfully claimed messages first
+							if claimErr == nil {
+								for _, msg := range claimedMsgs {
+									processor.ProcessMessage(ctx, MessageWrapper{
+										stream:        stream,
+										consumerGroup: options.consumerGroup,
+										msg:           &msg,
+									}, outputCh)
+								}
+							}
+						}
+
 						entries, err = c.XReadGroup(ctx, &redis.XReadGroupArgs{
 							Group:    options.consumerGroup,
 							Consumer: uniqueID,
