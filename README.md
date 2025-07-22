@@ -24,7 +24,21 @@ go get -u github.com/quantumcycle/expedit/amqp
 
 ### Example
 
-Check the code in the [example](example/main.go) folder for a working example.
+Check the code in the [examples](examples/) folder for working examples.
+
+## Documentation
+
+### 📋 Usage Patterns and Best Practices
+
+- **[📖 Universal Messaging Patterns](MESSAGING_PATTERNS.md)** - Patterns that work across all implementations
+  - Middleware chains, error handling, batching, circuit breakers, and more
+  - Works with Google Pub/Sub, Redis, AMQP, and Go channels
+
+- **[🏷️ Google Pub/Sub Patterns](google/USAGE_PATTERNS.md)** - Google-specific patterns
+  - Ordering keys, attributes, emulator testing, and Google-specific optimizations
+
+- **[📁 Examples](examples/)** - Complete working examples for each implementation
+  - Production-ready code with middleware, metrics, and error handling
 
 ## Documentation
 
@@ -69,6 +83,8 @@ Check the code in the [example](example/main.go) folder for a working example.
   * SubscriptionEngine: the combination of a Subscriber implementation, a set of middlewares and a message router
 
 ## How to use
+
+> 💡 **Quick Start**: Check out the [Universal Messaging Patterns](MESSAGING_PATTERNS.md) guide for comprehensive examples and best practices that work across all implementations.
 
 ### Middlewares
 
@@ -197,6 +213,25 @@ something expected by your handlers.
 * Context: The context of the message. This is a `context.Context` struct. 
 
 Then, you have some methods on the message itself. The most important ones are `Ack` and `Nack` to acknowledge or reject the message.
+
+## 🚀 Getting Started Checklist
+
+1. **📚 Read the documentation**:
+   - Start with [Universal Messaging Patterns](MESSAGING_PATTERNS.md) for general concepts
+   - Check implementation-specific guides (e.g., [Google Pub/Sub Patterns](google/USAGE_PATTERNS.md))
+
+2. **🔧 Choose your implementation**:
+   - Google Pub/Sub: `go get github.com/quantumcycle/expedit/google`
+   - Redis Streams: `go get github.com/quantumcycle/expedit/redis`
+   - AMQP/RabbitMQ: `go get github.com/quantumcycle/expedit/amqp`
+
+3. **👀 Study the examples**:
+   - Check [examples/](examples/) for production-ready code
+   - See [examples/google/google.go](examples/google/google.go) for a complete setup
+
+4. **🧪 Set up testing**:
+   - Use Docker for integration tests (see implementation guides)
+   - Follow the patterns in the test files
 
 ## Why
 
