@@ -1,7 +1,6 @@
 package google_test
 
 import (
-	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
 	"strings"
@@ -14,69 +13,28 @@ import (
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/quantumcycle/expedit/google"
-	"github.com/quantumcycle/expedit/google/emulator"
 	"golang.org/x/exp/rand"
 )
 
-func findMissingMessages(sentMsgs []string, receivedMsgs []string) interface{} {
-	missing := []string{}
-	for _, sentMsg := range sentMsgs {
-		found := false
-		for _, receivedMsg := range receivedMsgs {
-			if sentMsg == receivedMsg {
-				found = true
-				break
-			}
-		}
-		if !found {
-			missing = append(missing, sentMsg)
-		}
-	}
-	return missing
-}
+// Using shared utility for finding missing messages
 
 func randomInt(lower int, higher int) int {
 	rand.Seed(uint64(time.Now().UnixNano()))
 	return rand.Intn(higher-lower+1) + lower
 }
 
-func setupGoogleLoadTest(t *testing.T) (*pubsub.Client, *emulator.PubsubTestClient, []*emulator.TestTopic, map[string]*emulator.TestSubscription) {
-	// Set the emulator host for Google PubSub
-	t.Setenv("PUBSUB_EMULATOR_HOST", "localhost:29085")
-	
-	topics := []*emulator.TestTopic{}
-	subs := make(map[string]*emulator.TestSubscription)
-	ctx := context.Background()
-	emuClient := emulator.NewTestClient(ctx, "test-project")
-
-	// Create topics and subscriptions
-	for i := 0; i < 3; i++ {
-		topic := emuClient.CreateTestTopic(ctx, fmt.Sprintf("test-topic-%d", i+1))
-		topics = append(topics, topic)
-
-		//for each topic, create 3 subscriptions
-		for j := 0; j < 3; j++ {
-			sub := topic.CreateTestSubscription(ctx, fmt.Sprintf("test-topic-%d-subscription-%d", i+1, j+1), true)
-			subs[sub.Name] = sub
-		}
-	}
-
-	client, err := pubsub.NewClient(context.Background(), "test-project")
-	if err != nil {
-		t.Fatalf("failed to create pubsub client: %v", err)
-	}
-
-	t.Cleanup(func() {
-		client.Close()
-	})
-
-	return client, emuClient, topics, subs
+// setupGoogleLoadTest creates a load test setup using shared utilities
+func setupGoogleLoadTest(t *testing.T) *LoadTestSetup {
+	return NewLoadTestSetup(t, 3, 3) // 3 topics, 3 subscriptions per topic
 }
 
 func TestGooglePubsubLoadTest(t *testing.T) {
 	t.Run("should process all the messages at scale", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		client, _, topics, subs := setupGoogleLoadTest(t)
+		setup := setupGoogleLoadTest(t)
+		client := setup.Client
+		topics := setup.Topics
+		subs := setup.Subs
 
 		ctx := context.Background()
 		var totalSentCount int64
@@ -169,15 +127,15 @@ func TestGooglePubsubLoadTest(t *testing.T) {
 			g.Expect(len(receivedMsgs)).To(Equal(nbMessagesToSendPerTopic))
 
 			var sentMsgs []string
-			if strings.Index(subName, "test-topic-1") > 0 {
+			if strings.Contains(subName, "-1-subscription-") {
 				sentMsgs = publisherCounts[string(topics[0].Name)]
-			} else if strings.Index(subName, "test-topic-2") > 0 {
+			} else if strings.Contains(subName, "-2-subscription-") {
 				sentMsgs = publisherCounts[string(topics[1].Name)]
 			} else {
 				sentMsgs = publisherCounts[string(topics[2].Name)]
 			}
 
-			delta := findMissingMessages(sentMsgs, receivedMsgs)
+			delta := FindMissingMessages(sentMsgs, receivedMsgs)
 			g.Expect(delta).To(BeEmpty(), "Missing messages never received: %v", delta)
 		}
 	})
