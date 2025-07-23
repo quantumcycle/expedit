@@ -15,6 +15,10 @@ type DummyEvent2 struct {
 	Prop2 string `json:"prop2"`
 }
 
+type DummyEvent3 struct {
+	Prop3 string `json:"prop3"`
+}
+
 func CreatePromOutgoingCount(labels []string) *prometheus.CounterVec {
 	outgoingMsgCount := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "test",

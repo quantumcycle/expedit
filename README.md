@@ -37,6 +37,12 @@ Check the code in the [examples](examples/) folder for working examples.
 - **[🏷️ Google Pub/Sub Patterns](google/USAGE_PATTERNS.md)** - Google-specific patterns
   - Ordering keys, attributes, emulator testing, and Google-specific optimizations
 
+- **[🏷️ AMQP/RabbitMQ Patterns](amqp/USAGE_PATTERNS.md)** - RabbitMQ-specific patterns
+    - Support different exchange setup and routing, and RabbitMQ-specific optimizations
+
+- **[🏷️ RedisStream Patterns](redis/USAGE_PATTERNS.md)** - Redis-specific patterns
+    - Support consumer groups, pending messages recovery, stream size management, JSON serialization and Redis-specific optimizations
+
 - **[📁 Examples](examples/)** - Complete working examples for each implementation
   - Production-ready code with middleware, metrics, and error handling
 
