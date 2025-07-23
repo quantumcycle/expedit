@@ -18,9 +18,9 @@ func MetadataWithPrefix(prefix string) XAddValuesMarshaller {
 
 // PrefixMetadataExtractor is a function that extracts all values where the key starts with a prefix and use
 // them as metadata.
-func PrefixMetadataExtractor(prefix string) func(wrapper MessageWrapper) map[string]string {
-	return func(wrapper MessageWrapper) map[string]string {
-		metadata := make(map[string]string, len(wrapper.msg.Values))
+func PrefixMetadataExtractor(prefix string) func(wrapper MessageWrapper) map[string]interface{} {
+	return func(wrapper MessageWrapper) map[string]interface{} {
+		metadata := make(map[string]interface{}, len(wrapper.msg.Values))
 		for k, v := range wrapper.msg.Values {
 			if strings.HasPrefix(k, prefix) {
 				if s, ok := v.(string); ok {

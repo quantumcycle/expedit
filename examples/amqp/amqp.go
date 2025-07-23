@@ -3,15 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/lithammer/shortuuid/v3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/quantumcycle/expedit/amqp"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/message/middleware"
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/quantumcycle/expedit/core/subscriber"
-	examples "github.com/quantumcycle/expedit/examples"
+	examples "github.com/quantumcycle/expedit/example"
 	promware "github.com/quantumcycle/expedit/prometheus/middleware"
-	amqp091 "github.com/rabbitmq/amqp091-go"
+	amqpgo "github.com/rabbitmq/amqp091-go"
 	"math/rand"
 	"reflect"
 	"strconv"
@@ -35,20 +36,23 @@ func AddStructNameToMetadata() middleware.Middleware {
 	}
 }
 
-func createPublisher(conn *amqp091.Connection, exchange string) (*publisher.PublishingEngine, error) {
+func createPublisher(channel *amqp.ReconnectingChannel, exchange string) (*publisher.PublishingEngine, error) {
 	// Create routing function for different event types
-	routingFn := func(msg *message.Message) (string, error) {
+	routingKeyFn := func(msg *message.Message) (string, error) {
 		eventType, exists := msg.Metadata["event_type"]
 		if !exists {
 			return "default", nil
 		}
-		return eventType, nil
+		return fmt.Sprintf("%v", eventType), nil
 	}
 
-	pub, err := amqp.NewAMQPPublisher(conn,
-		exchange,
-		amqp.WithRoutingKeyFunction(routingFn),
-		amqp.WithHeaderProvider(amqp.MetadataAsHeaders()))
+	pub, err := amqp.NewAMQPPublisher(channel,
+		publisher.ConstantDestination(publisher.Destination(exchange)),
+		routingKeyFn,
+		amqp.DefaultMessageOptions{
+			ContentType:  "application/json",
+			DeliveryMode: amqpgo.Persistent,
+		})
 	if err != nil {
 		return nil, err
 	}
@@ -72,10 +76,10 @@ func createPublisher(conn *amqp091.Connection, exchange string) (*publisher.Publ
 	return pubEngine, nil
 }
 
-func createSubscriber(conn *amqp091.Connection, queueName string, router *subscriber.SubscriptionRouter) (*subscriber.SubscriptionEngine, error) {
-	amqpSub, err := amqp.NewAMQPSubscriber(conn,
+func createSubscriber(channel *amqp.ReconnectingChannel, queueName string, router *subscriber.SubscriptionRouter) (*subscriber.SubscriptionEngine, error) {
+	amqpSub, err := amqp.NewAMQPSubscriber(channel,
 		queueName,
-		amqp.WithAutoAck(false)) // Manual ack for better reliability
+		amqp.WithAutoAck())
 	if err != nil {
 		return nil, err
 	}
@@ -96,7 +100,7 @@ func createSubscriber(conn *amqp091.Connection, queueName string, router *subscr
 	return subEngine, nil
 }
 
-func setupInfrastructure(conn *amqp091.Connection, exchangeName, queueName string) error {
+func setupInfrastructure(conn *amqp.ReconnectingConnection, exchangeName, queueName string) error {
 	ch, err := conn.Channel()
 	if err != nil {
 		return err
@@ -106,7 +110,7 @@ func setupInfrastructure(conn *amqp091.Connection, exchangeName, queueName strin
 	// Declare exchange
 	err = ch.ExchangeDeclare(
 		exchangeName, // name
-		"direct",     // type
+		"fanout",     // type
 		true,         // durable
 		false,        // auto-deleted
 		false,        // internal
@@ -130,19 +134,16 @@ func setupInfrastructure(conn *amqp091.Connection, exchangeName, queueName strin
 		return err
 	}
 
-	// Bind queue to exchange for different routing keys
-	routingKeys := []string{"DummyEvent1", "DummyEvent2", "default"}
-	for _, key := range routingKeys {
-		err = ch.QueueBind(
-			queueName,    // queue name
-			key,          // routing key
-			exchangeName, // exchange
-			false,
-			nil,
-		)
-		if err != nil {
-			return err
-		}
+	// Bind a queue to the exchange
+	err = ch.QueueBind(
+		queueName,    // queue name
+		"",           // routing key
+		exchangeName, // exchange
+		false,
+		nil,
+	)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -150,11 +151,12 @@ func setupInfrastructure(conn *amqp091.Connection, exchangeName, queueName strin
 
 func main() {
 	ctx := context.Background()
-	exchangeName := "demo-exchange"
-	queueName := "demo-queue"
+	randomID := shortuuid.New()
+	exchangeName := fmt.Sprintf("demo-exchange-%s", randomID)
+	queueName := fmt.Sprintf("demo-queue-%s", randomID)
 
 	// Connect to RabbitMQ
-	conn, err := amqp091.Dial("amqp://guest:guest@localhost:25672/")
+	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
 	if err != nil {
 		panic(fmt.Sprintf("Failed to connect to RabbitMQ: %v", err))
 	}
@@ -166,29 +168,18 @@ func main() {
 		panic(fmt.Sprintf("Failed to setup infrastructure: %v", err))
 	}
 
+	channel, err := conn.Channel()
+
 	//****************** Producer **********************
 
-	pubEngine, err := createPublisher(conn, exchangeName)
-	if err != nil {
-		panic(err)
-	}
-
-	// Publish different types of messages
-	msg1 := message.NewMessage(ctx, examples.DummyEvent1{Prop1: "value1"})
-	err = pubEngine.Publish(msg1)
-	if err != nil {
-		panic(err)
-	}
-
-	msg2 := message.NewMessage(ctx, examples.DummyEvent2{Prop2: "value2"})
-	err = pubEngine.Publish(msg2)
+	pubEngine, err := createPublisher(channel, exchangeName)
 	if err != nil {
 		panic(err)
 	}
 
 	//***************** Consumer **********************
 	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
-	
+
 	// Handler for DummyEvent1
 	router.
 		AddHandler("DummyEvent1").
@@ -228,7 +219,7 @@ func main() {
 		return nil
 	})
 
-	subEngine, err := createSubscriber(conn, queueName, router)
+	subEngine, err := createSubscriber(channel, queueName, router)
 	if err != nil {
 		panic(err)
 	}
@@ -242,6 +233,25 @@ func main() {
 	}()
 
 	//****************** Main loop **********************
+	// Publish different types of messages
+	msg1 := message.NewMessage(ctx, examples.DummyEvent1{Prop1: "value1"})
+	err = pubEngine.Publish(msg1)
+	if err != nil {
+		panic(err)
+	}
+
+	msg2 := message.NewMessage(ctx, examples.DummyEvent2{Prop2: "value2"})
+	err = pubEngine.Publish(msg2)
+	if err != nil {
+		panic(err)
+	}
+
+	msg3 := message.NewMessage(ctx, examples.DummyEvent3{Prop3: "value3"})
+	err = pubEngine.Publish(msg3)
+	if err != nil {
+		panic(err)
+	}
+
 	fmt.Println("AMQP example running. Press Ctrl+C to stop...")
 	waitCh := make(chan bool, 1)
 	examples.CleanupOnInterrupt("amqp_example", func() {
