@@ -3,6 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"os"
+	"os/signal"
+	"reflect"
+	"strconv"
+	"time"
+
 	"github.com/lithammer/shortuuid/v3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/quantumcycle/expedit/core/message"
@@ -13,10 +20,6 @@ import (
 	promware "github.com/quantumcycle/expedit/prometheus/middleware"
 	exred "github.com/quantumcycle/expedit/redis"
 	"github.com/redis/go-redis/v9"
-	"math/rand"
-	"reflect"
-	"strconv"
-	"time"
 )
 
 func getTypeName(myvar interface{}) string {
@@ -138,17 +141,12 @@ func main() {
 	})
 
 	subEngine, err := createSubscriber(client, string(stream), router)
-	go func() {
-		err := subEngine.Start(context.TODO())
-		if err != nil {
-			panic(err)
-		}
-	}()
-
 	//****************** Main loop **********************
-	waitCh := make(chan bool, 1)
-	examples.CleanupOnInterrupt("main_wait", func() {
-		waitCh <- true
-	})
-	<-waitCh
+	// On Ctrl+C, Start stops receiving, waits for the in-flight handlers to finish and returns
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := subEngine.Start(runCtx); err != nil {
+		panic(err)
+	}
+	fmt.Println("Shutdown complete")
 }

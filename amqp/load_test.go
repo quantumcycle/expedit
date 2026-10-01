@@ -1,7 +1,7 @@
 package amqp_test
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -12,6 +12,8 @@ import (
 	"github.com/quantumcycle/expedit/amqp"
 	"github.com/quantumcycle/expedit/amqp/testrabbit"
 	"github.com/quantumcycle/expedit/core/loadtest"
+	"github.com/quantumcycle/expedit/core/message"
+	"github.com/quantumcycle/expedit/core/subscriber"
 	amqpgo "github.com/rabbitmq/amqp091-go"
 )
 
@@ -100,78 +102,36 @@ func TestAMQPLoadTest(t *testing.T) {
 		g := NewGomegaWithT(t)
 		conn, _, queues := setupAMQPLoadTest(t)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-		defer cancel()
-
 		var totalSentCount int64
 
 		received := loadtest.NewRecorder()
 		nbMessagesToSendPerQueue := 100
 
-		// Track consumer readiness
-		consumerReady := make(chan struct{}, len(queues)*2)
-
-		// Create subscribers for each queue
-		// Create 2 consumers per queue to test concurrent processing
+		// Create 2 consumers per queue to test concurrent processing, each on its own channel
+		var consumers []*receiving
 		for queueIndex, queue := range queues {
-			for j := 0; j < 2; j++ {
-				// Create individual channel for each consumer to avoid conflicts
+			for j := 1; j <= 2; j++ {
 				consumerChannel, err := conn.Channel()
 				g.Expect(err).NotTo(HaveOccurred())
+				defer consumerChannel.Close()
+				g.Expect(consumerChannel.Qos(subscriber.DefaultMaxInFlight, 0, false)).To(Succeed())
 
-				subscriber, err := amqp.NewAMQPSubscriber(consumerChannel, queue.QueueName)
+				sub, err := amqp.NewAMQPSubscriber(consumerChannel, queue.QueueName)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				msgCh, err := subscriber.Subscribe(ctx)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				go func(consumerIndex int, queueIndex int, queueName string, consumerChannel *amqp.ReconnectingChannel) {
-					defer func() {
-						subscriber.Close()
-						consumerChannel.Close()
-					}()
-
-					consumerID := fmt.Sprintf("queue-%d-consumer-%d", queueIndex, consumerIndex)
-					// Signal that this consumer is ready
-					consumerReady <- struct{}{}
-
-					for {
-						select {
-						case msg := <-msgCh:
-							if msg == nil {
-								return // Channel closed
-							}
-
-							// Small error rate for testing robustness
-							if loadtest.RandomInt(1, 1000) <= 5 { // 0.5% failure rate
-								msg.Nack()
-								continue
-							}
-
-							// Use payload content as identifier since message ID might be empty
-							received.Record(consumerID, string(msg.Payload.([]byte)))
-							msg.Ack()
-
-						case <-ctx.Done():
-							return
-						}
+				consumerID := fmt.Sprintf("queue-%d-consumer-%d", queueIndex, j)
+				consumers = append(consumers, startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+					// Small error rate for testing robustness
+					if loadtest.RandomInt(1, 1000) <= 5 { // 0.5% failure rate
+						return errors.New("simulated failure")
 					}
-				}(j+1, queueIndex, queue.QueueName, consumerChannel)
-			}
-		}
 
-		// Wait for all consumers to be ready
-		expectedConsumers := len(queues) * 2
-		for i := 0; i < expectedConsumers; i++ {
-			select {
-			case <-consumerReady:
-				// Consumer is ready
-			case <-time.After(5 * time.Second):
-				t.Fatalf("Timeout waiting for consumer %d to be ready", i+1)
+					// Use payload content as identifier since message ID might be empty
+					received.Record(consumerID, string(msg.Payload.([]byte)))
+					return nil
+				}))
 			}
 		}
-		// Give a little extra time for consumers to fully establish
-		time.Sleep(200 * time.Millisecond)
 
 		// Create publishers using direct queue publishing with individual channels
 		var publisherWg sync.WaitGroup
@@ -240,6 +200,18 @@ func TestAMQPLoadTest(t *testing.T) {
 			// Verify no message duplication between consumers
 			duplicates := loadtest.Duplicates(consumer1Msgs, consumer2Msgs)
 			g.Expect(duplicates).To(BeEmpty(), "Found duplicate messages between consumers for queue %d: %v", queueIndex, duplicates)
+
+			// Every message was processed, so with the count above every message was processed exactly once
+			expected := make([]string, 0, nbMessagesToSendPerQueue)
+			for j := 0; j < nbMessagesToSendPerQueue; j++ {
+				expected = append(expected, fmt.Sprintf("message %d for queue %d", j+1, queueIndex))
+			}
+			missing := loadtest.Missing(expected, append(consumer1Msgs, consumer2Msgs...))
+			g.Expect(missing).To(BeEmpty(), "Missing messages for queue %d: %v", queueIndex, missing)
+		}
+
+		for _, consumer := range consumers {
+			g.Expect(consumer.Stop()).To(Succeed())
 		}
 	})
 }

@@ -458,26 +458,12 @@ func TestAMQPHeaders(t *testing.T) {
 			sub, err := amqp.NewAMQPSubscriber(channel, testQueue)
 			g.Expect(err).NotTo(HaveOccurred())
 
-			// Subscribe and get message channel
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			msgCh, err := sub.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer sub.Close()
-
-			// Collect received messages with ready signal
+			// Receive the messages
 			receivedMessages := make(chan *message.Message, 1)
-			ready := make(chan struct{}, 1)
-			go func() {
-				ready <- struct{}{}
-				for msg := range msgCh {
-					msg.Ack()
-					receivedMessages <- msg
-					break
-				}
-			}()
-			<-ready
-			time.Sleep(100 * time.Millisecond)
+			startReceive(t, conn, sub, testQueue, func(msg *message.Message) error {
+				receivedMessages <- msg
+				return nil
+			})
 
 			// Publish message with metadata
 			testMsg := message.NewMessage(context.Background(), []byte("test message")).
@@ -491,7 +477,7 @@ func TestAMQPHeaders(t *testing.T) {
 
 			// Verify received message has prefixed headers as metadata
 			var receivedMsg *message.Message
-			g.Eventually(receivedMessages, 2*time.Second).Should(Receive(&receivedMsg))
+			g.Eventually(receivedMessages, 5*time.Second).Should(Receive(&receivedMsg))
 
 			g.Expect(receivedMsg.Metadata).To(HaveKeyWithValue("app.service", "auth"))
 			g.Expect(receivedMsg.Metadata).To(HaveKeyWithValue("app.version", "1.2.3"))

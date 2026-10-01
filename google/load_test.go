@@ -2,6 +2,7 @@ package google_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -27,7 +28,8 @@ func TestGooglePubsubLoadTest(t *testing.T) {
 		topics := setup.Topics
 		subs := setup.Subs
 
-		ctx := context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		var totalSentCount int64
 		var totalProcessedCount int64
 		var nackCount int64
@@ -45,25 +47,20 @@ func TestGooglePubsubLoadTest(t *testing.T) {
 				subscriber, err := google.NewGoogleSubscriber(client, sub.Name)
 				g.Expect(err).NotTo(HaveOccurred())
 
-				msgCh, err := subscriber.Subscribe(ctx)
-				g.Expect(err).NotTo(HaveOccurred())
-				go func(consumerIndex int, subscriptionName string) {
-					consumerID := fmt.Sprintf("%s-consumer-%d", subscriptionName, consumerIndex)
-					for msg := range msgCh {
-						//simulate some random processing error and make sure we still process all messages
-						//1% of messages will fail
-						if loadtest.RandomInt(1, 100) == 1 {
-							atomic.AddInt64(&nackCount, 1)
-							msg.Nack()
-							continue
-						}
-
-						// Record before counting, so the records are complete once the count is reached
-						received.Record(consumerID, msg.ID)
-						atomic.AddInt64(&totalProcessedCount, 1)
-						msg.Ack()
+				consumerID := fmt.Sprintf("%s-consumer-%d", subName, j+1)
+				StartReceive(t, ctx, subscriber, func(msg *message.Message) error {
+					//simulate some random processing error and make sure we still process all messages
+					//1% of messages will fail
+					if loadtest.RandomInt(1, 100) == 1 {
+						atomic.AddInt64(&nackCount, 1)
+						return errors.New("simulated processing error")
 					}
-				}(j+1, subName)
+
+					// Record before counting, so the records are complete once the count is reached
+					received.Record(consumerID, msg.ID)
+					atomic.AddInt64(&totalProcessedCount, 1)
+					return nil
+				})
 			}
 		}
 

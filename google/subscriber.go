@@ -4,8 +4,11 @@ import (
 	"cloud.google.com/go/pubsub"
 	"context"
 	"errors"
+	"fmt"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/subscriber"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"strconv"
 	"time"
 )
@@ -17,30 +20,23 @@ type MessageUnmarshaller func(ctx context.Context, msg *pubsub.Message) (*messag
 type SubscriberOption func(*SubscriberOptions)
 
 type SubscriberOptions struct {
-	onProcessingTimeout func(ctx context.Context, msg *pubsub.Message)
-	processingTimeout   time.Duration
-	receiveSettings     pubsub.ReceiveSettings
-	parseAttributes     bool
+	processingTimeout time.Duration
+	receiveSettings   pubsub.ReceiveSettings
+	parseAttributes   bool
 }
 
-// WithProcessingTimeoutHandler is a function that is called when a message processing times out.
-func WithProcessingTimeoutHandler(handler func(ctx context.Context, msg *pubsub.Message)) SubscriberOption {
-	return func(opts *SubscriberOptions) {
-		opts.onProcessingTimeout = handler
-	}
-}
-
-// WithProcessingTimeout will dictate how long a message will be processed before it is nacked.
-// 0 means no timeout, wait forever. Keep in mind that GCP uses the "Acknowledgement deadline" to determine if a
-// message needs to be redelivered. ProcessingTimeout has no impact on the "Acknowledgement deadline".
-// Default value is 600 seconds, which is the max value of the GCP "Acknowledgement deadline".
+// WithProcessingTimeout is the deadline of the context of each message, see subscriber.DispatchOptions.
+// 0 means no deadline. The Pub/Sub client extends the "Acknowledgement deadline" while the handler runs, up to
+// ReceiveSettings.MaxExtension. Default value is 600 seconds, which is the max value of the GCP
+// "Acknowledgement deadline".
 func WithProcessingTimeout(timeout time.Duration) SubscriberOption {
 	return func(opts *SubscriberOptions) {
 		opts.processingTimeout = timeout
 	}
 }
 
-// WithReceiveSettings is a set of options to pass the underlying gcp pubsub.Subscription
+// WithReceiveSettings is a set of options to pass the underlying gcp pubsub.Subscription. Its
+// MaxOutstandingMessages and NumGoroutines limit how many messages are handled at the same time.
 func WithReceiveSettings(settings pubsub.ReceiveSettings) SubscriberOption {
 	return func(opts *SubscriberOptions) {
 		opts.receiveSettings = settings
@@ -55,8 +51,13 @@ func WithParseAttributes(parseAttributes bool) SubscriberOption {
 	}
 }
 
+// ErrSubscriptionNotFound is returned by Receive when the subscription does not exist.
+var ErrSubscriptionNotFound = errors.New("subscription does not exist")
+
 type Subscriber struct {
-	internalSubscriber *subscriber.MessageSubscriber[*pubsub.Message]
+	client       *pubsub.Client
+	subscription string
+	options      SubscriberOptions
 }
 
 func NewGoogleSubscriber(
@@ -76,67 +77,67 @@ func NewGoogleSubscriber(
 		opt(&options)
 	}
 
-	processor := subscriber.MessageProcessor[*pubsub.Message]{
-		Ack: func(ctx context.Context, msg *pubsub.Message) error {
-			msg.Ack()
-			return nil
-		},
-		Nack: func(ctx context.Context, msg *pubsub.Message) error {
-			msg.Nack()
-			return nil
-		},
-		MessageUnmarshall: func(ctx context.Context, pubMsg *pubsub.Message) *message.Message {
-			metadata := make(map[string]interface{})
-			for k, v := range pubMsg.Attributes {
-				if options.parseAttributes {
-					metadata[k] = parseAsPrimitiveType(v)
-				} else {
-					metadata[k] = v
-				}
-			}
-
-			msg := message.NewMessage(ctx, pubMsg.Data)
-			msg.ID = pubMsg.ID
-			msg.Metadata = metadata
-			return msg
-		},
-		ProcessingTimeout:   options.processingTimeout,
-		OnProcessingTimeout: options.onProcessingTimeout,
-	}
-	internalSubscriber := subscriber.MessageSubscriber[*pubsub.Message]{
-		InitializeFn: func(ctx context.Context, outputCh chan *message.Message, done func(err error)) error {
-			sub := c.Subscription(subscription)
-			if ok, err := sub.Exists(ctx); !ok || err != nil {
-				return errors.New("subscription does not exist")
-			}
-			sub.ReceiveSettings = options.receiveSettings
-			go func() {
-				// Receive returns nil when ctx is cancelled, any other error is terminal.
-				done(sub.Receive(ctx,
-					func(ctx context.Context, pubMsg *pubsub.Message) {
-						processor.ProcessMessage(ctx, pubMsg, outputCh)
-					}))
-			}()
-			return nil
-		},
-	}
-
 	return &Subscriber{
-		internalSubscriber: &internalSubscriber,
+		client:       c,
+		subscription: subscription,
+		options:      options,
 	}, nil
+}
+
+// Receive implements subscriber.Subscriber. The Pub/Sub client limits the concurrency, see WithReceiveSettings.
+func (s *Subscriber) Receive(ctx context.Context, handler message.HandlerFunc) error {
+	d := subscriber.NewDispatcher(handler, subscriber.DispatchOptions{ProcessingTimeout: s.options.processingTimeout})
+	sub := s.client.Subscription(s.subscription)
+	sub.ReceiveSettings = s.options.receiveSettings
+
+	// Receive returns nil when ctx is done, after all the callbacks returned
+	err := sub.Receive(ctx, func(ctx context.Context, pubMsg *pubsub.Message) {
+		d.Handle(subscriber.Delivery{
+			Message: s.toMessage(ctx, pubMsg),
+			Ack: func(context.Context) error {
+				pubMsg.Ack()
+				return nil
+			},
+			Nack: func(context.Context) error {
+				pubMsg.Nack()
+				return nil
+			},
+		})
+	})
+	if status.Code(err) == codes.NotFound {
+		return fmt.Errorf("%w: %s: %w", ErrSubscriptionNotFound, s.subscription, err)
+	}
+	return err
+}
+
+func (s *Subscriber) toMessage(ctx context.Context, pubMsg *pubsub.Message) *message.Message {
+	metadata := make(map[string]interface{}, len(pubMsg.Attributes))
+	for k, v := range pubMsg.Attributes {
+		if s.options.parseAttributes {
+			metadata[k] = parseAsPrimitiveType(v)
+		} else {
+			metadata[k] = v
+		}
+	}
+
+	msg := message.NewMessage(ctx, pubMsg.Data)
+	msg.ID = pubMsg.ID
+	msg.Metadata = metadata
+	return msg
 }
 
 // parseAsPrimitiveType will try to parse the value as a primitive type, if it fails, it will return the original value.
 // It supports boolean, integers and floats. Otherwise, it will return the original value as string
 func parseAsPrimitiveType(v string) interface{} {
-	b, err := strconv.ParseBool(v)
-	if err == nil {
-		return b
-	}
-
+	// Integers come before booleans, because strconv.ParseBool accepts "0" and "1"
 	i, err := strconv.ParseInt(v, 10, 64)
 	if err == nil {
 		return i
+	}
+
+	b, err := strconv.ParseBool(v)
+	if err == nil {
+		return b
 	}
 
 	f, err := strconv.ParseFloat(v, 64)
@@ -145,16 +146,4 @@ func parseAsPrimitiveType(v string) interface{} {
 	}
 
 	return v
-}
-
-func (s *Subscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {
-	return s.internalSubscriber.Subscribe(ctx)
-}
-
-func (s *Subscriber) Err() error {
-	return s.internalSubscriber.Err()
-}
-
-func (s *Subscriber) Close() error {
-	return s.internalSubscriber.Close()
 }

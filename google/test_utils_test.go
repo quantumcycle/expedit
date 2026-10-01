@@ -4,7 +4,6 @@ package google_test
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/core/message"
+	"github.com/quantumcycle/expedit/core/subscriber"
 	"github.com/quantumcycle/expedit/google/emulator"
 )
 
@@ -69,20 +69,24 @@ func ExpectMessageCount[T any](g Gomega, ch <-chan T, expectedCount int, timeout
 	}, timeout).Should(Equal(expectedCount))
 }
 
-// AsyncCountMessages counts messages in a channel for a specified duration
-func AsyncCountMessages(count *atomic.Int32, ch <-chan *message.Message, duration time.Duration) {
+// StartReceive runs subscriber.Receive in a goroutine and returns a channel that gets its result. The test cleanup
+// waits for Receive to return, so cancel ctx before the test ends (usually with defer cancel()).
+func StartReceive(t *testing.T, ctx context.Context, sub subscriber.Subscriber, handler message.HandlerFunc) <-chan error {
+	t.Helper()
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), duration)
-		defer cancel()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ch:
-				count.Add(1)
-			}
-		}
+		defer close(done)
+		errCh <- sub.Receive(ctx, handler)
 	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Error("Receive did not return after the test ended")
+		}
+	})
+	return errCh
 }
 
 // LoadTestSetup provides setup for load testing scenarios

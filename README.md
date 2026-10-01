@@ -137,7 +137,7 @@ optionally, you can add middlewares to the engine. The middlewares will be execu
 	channelPub := publisher.NewChannelPublisher(channel)
 	pubEngine := publisher.NewPublishingEngine(channelPub)
 	pubEngine.AddMiddleware(middleware.Throttle(1, time.Second))
-	pubEngine.Publish(message.NewMessage(context.Background(), uuid.New().String(), []byte("test")))
+	pubEngine.Publish(message.NewMessage(context.Background(), []byte("test")))
 ```
 
 
@@ -146,26 +146,42 @@ optionally, you can add middlewares to the engine. The middlewares will be execu
 The subscription part is a bit more complex. You need to create a `SubscriptionEngine`, which starts by providing a 
 `Subscriber` implementation and then a `Router` to send messages to the right handler. You can also add middlewares to the engine.
 
-Finally, you can set some error and panic listeners via the `SetErrorListener` and `SetPanicListener` methods.
-
-The last step is to start the engine for it to start processing messages.
+The last step is to start the engine for it to start processing messages. `Start` blocks until its context is done or
+receiving fails.
 
 ```go
-    channel := make(chan *message.Message, 100)
+	channel := make(chan *message.Message, 100)
 	subs := subscriber.NewChannelSubscriber(channel, 10)
-	router := subscriber.NewRouter(nil)
+	router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("type"))
 	router.AddDefaultHandler(func(msg *message.Message) error {
 		return nil
 	})
 
 	subEngine := subscriber.NewSubscriptionEngine(subs, *router)
-	go func() {
-		err := subEngine.Start()
-		if err != nil {
-			panic(err)
-		}
-	}()
+	if err := subEngine.Start(ctx); err != nil {
+		log.Fatal(err)
+	}
 ```
+
+A `Subscriber` implementation exposes a single blocking method:
+
+```go
+	Receive(ctx context.Context, handler message.HandlerFunc) error
+```
+
+* **Acknowledgement**: the message is acked when the handler returns `nil`, and nacked when it returns an error or
+panics. What a nack means depends on the implementation (requeue in RabbitMQ, redelivery in Google Pub/Sub, claim by
+another consumer after an idle timeout in Redis streams).
+* **Concurrency**: messages are handled concurrently, up to a limit (`WithMaxInFlight`, or the receive settings of
+Google Pub/Sub). When the limit is reached, the subscriber stops reading, which applies backpressure on the broker.
+* **Processing timeout**: it is the deadline of the message context (`msg.Context()`). A handler that respects its
+context returns the context error after the deadline, and the message is nacked.
+* **Shutdown**: cancelling the context of `Receive` stops receiving, but does not cancel the context of the messages
+being handled. `Receive` waits for these handlers to return, acknowledges their messages, and returns `nil`.
+* **Errors**: when receiving fails, `Receive` waits for the in-flight handlers and returns the error.
+
+A handler that panics crashes the process after its message is nacked. Add the `ConvertPanicToError` middleware to
+turn panics into errors instead.
 
 ### Router
 
@@ -176,11 +192,11 @@ The simplest case would be if you only want a single handler to process all mess
 `AddDefaultHandler` method of the router and all messages will be sent to that handler.
 
 ```go
-    router := router.NewRouter()
-    router.AddDefaultHandler(handler.NewHandler(func(ctx context.Context, msg *message.Message) error {
-        fmt.Println("Received message:", string(msg.Payload))
+    router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("type"))
+    router.AddDefaultHandler(func(msg *message.Message) error {
+        fmt.Println("Received message:", msg.Payload)
         return nil
-    }))
+    })
 ```
 
 If you want to route messages to different handlers based on some property of the message, you will first need to provide
@@ -189,10 +205,10 @@ For example, you could use the `RouteFromMetadataKey` function to get the routin
 
 ```go
     router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
-    router.AddHandler("type1", func(msg *message.Message) error {
+    router.AddHandler("type1").Handle(func(msg *message.Message) error {
         return nil
     })
-    router.AddHandler("type2", func(msg *message.Message) error {
+    router.AddHandler("type2").Handle(func(msg *message.Message) error {
         return nil
     })
 ```
@@ -210,15 +226,16 @@ The `Message` struct is the heart of this library. It's the struct that will be 
 A message has:
 * An ID: Just a simple string to identify the message. The value of this ID is gonna depend on the implementation 
 you're using. You don't need to provide an ID when creating new messages, but your publisher implementation might require it.
-* Metadata: Just a simple map of strings to strings. You can use this to add any metadata you want to the message. 
+* Metadata: A map of string keys to values. You can use this to add any metadata you want to the message. 
 For example, you could add a `type` key to the metadata to be used by the router to route the message to the right handler. 
 Your publisher implementation is responsible for adding the metadata to the underlying structure if supported.
 * Payload: The actual message payload. This is of type `any`. Your `PublishingEngine` will use a marshaller to transform 
 this into a byte slice to be sent, and your `SubscriptionEngine` will use an unmarshaller to transform the byte slice into 
 something expected by your handlers.
-* Context: The context of the message. This is a `context.Context` struct. 
+* Context: The context of the message (`msg.Context()`). For a received message, it carries the processing timeout
+deadline.
 
-Then, you have some methods on the message itself. The most important ones are `Ack` and `Nack` to acknowledge or reject the message.
+A received message is acknowledged from the result of its handler, see [Subscribing](#subscribing).
 
 ## 🚀 Getting Started Checklist
 

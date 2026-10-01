@@ -2,6 +2,8 @@ package subscriber_test
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,128 +12,120 @@ import (
 	"github.com/quantumcycle/expedit/core/subscriber"
 )
 
+func receive(ctx context.Context, sub subscriber.Subscriber, handler message.HandlerFunc) chan error {
+	done := make(chan error, 1)
+	go func() { done <- sub.Receive(ctx, handler) }()
+	return done
+}
+
 func TestChannelSubscriber(t *testing.T) {
-	t.Run("Subscribe", func(t *testing.T) {
-		t.Run("should deliver a copy of the payload and metadata", func(t *testing.T) {
+	t.Run("Receive", func(t *testing.T) {
+		t.Run("should handle a copy of the payload and metadata", func(t *testing.T) {
 			g := NewGomegaWithT(t)
 			in := make(chan *message.Message, 1)
-			sub := subscriber.NewChannelSubscriber(in, 1)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			out, err := sub.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
+			got := make(chan *message.Message, 1)
+			receive(ctx, subscriber.NewChannelSubscriber(in, 1), func(msg *message.Message) error {
+				got <- msg
+				return nil
+			})
+			sent := message.NewMessage(context.Background(), "hello").WithMetadata("k", "v")
 
-			in <- message.NewMessage(context.Background(), "hello").WithMetadata("k", "v")
+			in <- sent
 
-			var got *message.Message
-			g.Eventually(out).Should(Receive(&got))
-			g.Expect(got.Payload).To(Equal("hello"))
-			g.Expect(got.Metadata).To(HaveKeyWithValue("k", "v"))
+			var msg *message.Message
+			g.Eventually(got).Should(Receive(&msg))
+			g.Expect(msg).NotTo(BeIdenticalTo(sent))
+			g.Expect(msg.Payload).To(Equal("hello"))
+			g.Expect(msg.Metadata).To(HaveKeyWithValue("k", "v"))
 		})
 
-		t.Run("should close the output channel when the context is cancelled", func(t *testing.T) {
+		t.Run("should handle a nacked message again until it is acked", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			in := make(chan *message.Message)
-			sub := subscriber.NewChannelSubscriber(in, 2)
+			in := make(chan *message.Message, 1)
 			ctx, cancel := context.WithCancel(context.Background())
-			out, _ := sub.Subscribe(ctx)
+			defer cancel()
+			var attempts atomic.Int32
+			receive(ctx, subscriber.NewChannelSubscriber(in, 1), func(msg *message.Message) error {
+				if attempts.Add(1) < 3 {
+					return errors.New("not yet")
+				}
+				return nil
+			})
+
+			in <- message.NewMessage(context.Background(), "p")
+
+			g.Eventually(attempts.Load).Should(BeEquivalentTo(3))
+			g.Consistently(attempts.Load, 50*time.Millisecond).Should(BeEquivalentTo(3))
+		})
+
+		t.Run("should return nil when ctx is done, after the in-flight handlers", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			in := make(chan *message.Message, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var finished atomic.Bool
+			done := receive(ctx, subscriber.NewChannelSubscriber(in, 1), func(msg *message.Message) error {
+				close(started)
+				<-release
+				finished.Store(true)
+				return nil
+			})
+			in <- message.NewMessage(context.Background(), "p")
+			<-started
 
 			cancel()
 
-			g.Eventually(out).Should(BeClosed())
+			g.Consistently(done, 50*time.Millisecond).ShouldNot(Receive())
+			close(release)
+			g.Eventually(done).Should(Receive(BeNil()))
+			g.Expect(finished.Load()).To(BeTrue())
 		})
 
-		t.Run("should close the output channel when the input channel is closed", func(t *testing.T) {
+		t.Run("should return nil once the input is closed and every message is handled", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			in := make(chan *message.Message)
-			sub := subscriber.NewChannelSubscriber(in, 2)
-			out, _ := sub.Subscribe(context.Background())
-
+			in := make(chan *message.Message, 3)
+			var acked, attempts atomic.Int32
+			for range 3 {
+				in <- message.NewMessage(context.Background(), "p")
+			}
 			close(in)
 
-			g.Eventually(out).Should(BeClosed())
+			err := subscriber.NewChannelSubscriber(in, 2).Receive(context.Background(), func(msg *message.Message) error {
+				// Nack the first attempt of each message
+				if attempts.Add(1)%2 == 1 {
+					return errors.New("nack")
+				}
+				acked.Add(1)
+				return nil
+			})
+
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(acked.Load()).To(BeEquivalentTo(3))
 		})
 
-		t.Run("should redeliver a nacked message", func(t *testing.T) {
+		t.Run("should not handle more than maxInFlight messages at the same time", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			in := make(chan *message.Message, 1)
-			sub := subscriber.NewChannelSubscriber(in, 1)
+			in := make(chan *message.Message, 10)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			out, _ := sub.Subscribe(ctx)
+			var inFlight atomic.Int32
+			release := make(chan struct{})
+			receive(ctx, subscriber.NewChannelSubscriber(in, 2), func(msg *message.Message) error {
+				inFlight.Add(1)
+				<-release
+				return nil
+			})
 
-			in <- message.NewMessage(context.Background(), "retry-me")
+			for range 10 {
+				in <- message.NewMessage(context.Background(), "p")
+			}
 
-			var first, second *message.Message
-			g.Eventually(out).Should(Receive(&first))
-			first.Nack()
-			g.Eventually(out).Should(Receive(&second))
-			g.Expect(second.Payload).To(Equal("retry-me"))
-		})
-
-		t.Run("should not redeliver an acked message", func(t *testing.T) {
-			g := NewGomegaWithT(t)
-			in := make(chan *message.Message, 1)
-			sub := subscriber.NewChannelSubscriber(in, 1)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			out, _ := sub.Subscribe(ctx)
-
-			in <- message.NewMessage(context.Background(), "once")
-
-			var first *message.Message
-			g.Eventually(out).Should(Receive(&first))
-			first.Ack()
-			g.Consistently(out, 100*time.Millisecond).ShouldNot(Receive())
-		})
-
-		t.Run("should cancel the message context once it is acked", func(t *testing.T) {
-			g := NewGomegaWithT(t)
-			in := make(chan *message.Message, 1)
-			sub := subscriber.NewChannelSubscriber(in, 1)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			out, _ := sub.Subscribe(ctx)
-			in <- message.NewMessage(context.Background(), "x")
-
-			var got *message.Message
-			g.Eventually(out).Should(Receive(&got))
-			got.Ack()
-
-			g.Eventually(got.Context().Done()).Should(BeClosed())
-		})
-
-		t.Run("should not panic nor hang when a message is nacked after Close", func(t *testing.T) {
-			g := NewGomegaWithT(t)
-			in := make(chan *message.Message, 1)
-			sub := subscriber.NewChannelSubscriber(in, 1)
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			out, _ := sub.Subscribe(ctx)
-			in <- message.NewMessage(context.Background(), "x")
-			var got *message.Message
-			g.Eventually(out).Should(Receive(&got))
-
-			g.Expect(sub.Close()).To(Succeed())
-			got.Nack()
-
-			g.Eventually(out).Should(BeClosed())
-		})
-
-		t.Run("should not block on nack requeue when the input is full and the context is cancelled", func(t *testing.T) {
-			g := NewGomegaWithT(t)
-			in := make(chan *message.Message) // unbuffered and nobody reads: requeue can't complete
-			sub := subscriber.NewChannelSubscriber(in, 1)
-			ctx, cancel := context.WithCancel(context.Background())
-			out, _ := sub.Subscribe(ctx)
-			go func() { in <- message.NewMessage(context.Background(), "x") }()
-			var got *message.Message
-			g.Eventually(out).Should(Receive(&got))
-			got.Nack()
-
-			cancel()
-
-			g.Eventually(out).Should(BeClosed())
+			g.Eventually(inFlight.Load).Should(BeEquivalentTo(2))
+			g.Consistently(inFlight.Load, 50*time.Millisecond).Should(BeEquivalentTo(2))
+			close(release)
 		})
 	})
 }
