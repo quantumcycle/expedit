@@ -3,13 +3,13 @@ package redis_test
 import (
 	"context"
 	"fmt"
-	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	. "github.com/onsi/gomega"
+	"github.com/quantumcycle/expedit/core/loadtest"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
 	subredis "github.com/quantumcycle/expedit/redis"
@@ -17,35 +17,6 @@ import (
 )
 
 // Shared utilities for Redis load testing
-
-// snapshot returns a copy of the entry of a map that is written concurrently by the consumers.
-func snapshot(mu *sync.Mutex, m map[string][]string, key string) []string {
-	mu.Lock()
-	defer mu.Unlock()
-	return append([]string(nil), m[key]...)
-}
-
-func randomInt(lower int, higher int) int {
-	return rand.IntN(higher-lower+1) + lower
-}
-
-func findDuplicateMessages(msgs1 []string, msgs2 []string) []string {
-	duplicates := []string{}
-	seen := make(map[string]bool)
-
-	// Mark all messages from first list
-	for _, msg := range msgs1 {
-		seen[msg] = true
-	}
-
-	// Check for duplicates in second list
-	for _, msg := range msgs2 {
-		if seen[msg] {
-			duplicates = append(duplicates, msg)
-		}
-	}
-	return duplicates
-}
 
 func generateTestPayload(testID string, messageNum int, size int) map[string]interface{} {
 	data := make([]byte, size)
@@ -98,13 +69,9 @@ func TestRedisLoadTest(t *testing.T) {
 
 		var totalSentCount int64
 		var totalProcessedCount int64
-		var publisherMu sync.Mutex
-		var consumerMu sync.Mutex
-		var publisherCounts map[string][]string
-		var consumerCounts map[string][]string
 
-		publisherCounts = make(map[string][]string)
-		consumerCounts = make(map[string][]string)
+		sent := loadtest.NewRecorder()
+		received := loadtest.NewRecorder()
 
 		nbStreams := 3
 		nbPublishersPerStream := 1
@@ -145,12 +112,7 @@ func TestRedisLoadTest(t *testing.T) {
 							}
 
 							atomic.AddInt64(&totalProcessedCount, 1)
-							consumerMu.Lock()
-							if _, exists := consumerCounts[consumerID]; !exists {
-								consumerCounts[consumerID] = []string{}
-							}
-							consumerCounts[consumerID] = append(consumerCounts[consumerID], msg.ID)
-							consumerMu.Unlock()
+							received.Record(consumerID, msg.ID)
 							msg.Ack()
 						}
 					}
@@ -185,12 +147,7 @@ func TestRedisLoadTest(t *testing.T) {
 						g.Expect(err).NotTo(HaveOccurred())
 
 						atomic.AddInt64(&totalSentCount, 1)
-						publisherMu.Lock()
-						if _, exists := publisherCounts[publisherID]; !exists {
-							publisherCounts[publisherID] = []string{}
-						}
-						publisherCounts[publisherID] = append(publisherCounts[publisherID], msg.ID)
-						publisherMu.Unlock()
+						sent.Record(publisherID, msg.ID)
 					}
 				}(streamIndex, pubIndex, stream)
 			}
@@ -210,8 +167,8 @@ func TestRedisLoadTest(t *testing.T) {
 			consumer1ID := fmt.Sprintf("stream-%d-consumer-%d", streamIndex, 1)
 			consumer2ID := fmt.Sprintf("stream-%d-consumer-%d", streamIndex, 2)
 
-			consumer1Msgs := snapshot(&consumerMu, consumerCounts, consumer1ID)
-			consumer2Msgs := snapshot(&consumerMu, consumerCounts, consumer2ID)
+			consumer1Msgs := received.IDs(consumer1ID)
+			consumer2Msgs := received.IDs(consumer2ID)
 
 			totalMsgsForStream := len(consumer1Msgs) + len(consumer2Msgs)
 			expectedMsgsForStream := nbPublishersPerStream * nbMessagesToSendPerPublisher
@@ -219,7 +176,7 @@ func TestRedisLoadTest(t *testing.T) {
 			g.Expect(totalMsgsForStream).To(Equal(expectedMsgsForStream))
 
 			// Verify no message duplication
-			duplicates := findDuplicateMessages(consumer1Msgs, consumer2Msgs)
+			duplicates := loadtest.Duplicates(consumer1Msgs, consumer2Msgs)
 			g.Expect(duplicates).To(BeEmpty())
 		}
 	})
@@ -237,10 +194,8 @@ func TestRedisLoadTest(t *testing.T) {
 		var totalSentCount int64
 		var totalProcessedCount int64
 		var nackCount int64
-		var consumerMu sync.Mutex
-		var consumerCounts map[string][]string
 
-		consumerCounts = make(map[string][]string)
+		received := loadtest.NewRecorder()
 		nbMessagesToSend := 300
 		nackRate := 10 // 10% nack rate for failing consumers
 
@@ -281,7 +236,7 @@ func TestRedisLoadTest(t *testing.T) {
 						processedByThisConsumer++
 
 						// Simulate failure - nack messages and crash after processing some
-						if randomInt(1, 100) <= nackRate || processedByThisConsumer > 50 {
+						if loadtest.RandomInt(1, 100) <= nackRate || processedByThisConsumer > 50 {
 							atomic.AddInt64(&nackCount, 1)
 							msg.Nack()
 							if processedByThisConsumer > 50 {
@@ -291,12 +246,7 @@ func TestRedisLoadTest(t *testing.T) {
 						}
 
 						atomic.AddInt64(&totalProcessedCount, 1)
-						consumerMu.Lock()
-						if _, exists := consumerCounts[consumerID]; !exists {
-							consumerCounts[consumerID] = []string{}
-						}
-						consumerCounts[consumerID] = append(consumerCounts[consumerID], msg.ID)
-						consumerMu.Unlock()
+						received.Record(consumerID, msg.ID)
 						msg.Ack()
 					}
 				}
@@ -365,12 +315,7 @@ func TestRedisLoadTest(t *testing.T) {
 						}
 
 						atomic.AddInt64(&totalProcessedCount, 1)
-						consumerMu.Lock()
-						if _, exists := consumerCounts[consumerID]; !exists {
-							consumerCounts[consumerID] = []string{}
-						}
-						consumerCounts[consumerID] = append(consumerCounts[consumerID], msg.ID)
-						consumerMu.Unlock()
+						received.Record(consumerID, msg.ID)
 						msg.Ack()
 					}
 				}
@@ -386,8 +331,8 @@ func TestRedisLoadTest(t *testing.T) {
 		g.Expect(atomic.LoadInt64(&nackCount)).To(BeNumerically(">", 0))
 
 		// Verify recovery consumers processed some messages
-		recoveryConsumer1Msgs := snapshot(&consumerMu, consumerCounts, "recovery-consumer-1")
-		recoveryConsumer2Msgs := snapshot(&consumerMu, consumerCounts, "recovery-consumer-2")
+		recoveryConsumer1Msgs := received.IDs("recovery-consumer-1")
+		recoveryConsumer2Msgs := received.IDs("recovery-consumer-2")
 		totalRecoveryMsgs := len(recoveryConsumer1Msgs) + len(recoveryConsumer2Msgs)
 
 		g.Expect(totalRecoveryMsgs).To(BeNumerically(">", 0),
@@ -404,10 +349,8 @@ func TestRedisLoadTest(t *testing.T) {
 		var totalSentCount int64
 		var totalProcessedCount int64
 		var nackCount int64
-		var consumerMu sync.Mutex
-		var consumerCounts map[string][]string
 
-		consumerCounts = make(map[string][]string)
+		received := loadtest.NewRecorder()
 
 		nbStreams := 2
 		nbPublishers := 3
@@ -450,19 +393,14 @@ func TestRedisLoadTest(t *testing.T) {
 							}
 
 							// Simulate occasional errors
-							if randomInt(1, 100) <= nackRate {
+							if loadtest.RandomInt(1, 100) <= nackRate {
 								atomic.AddInt64(&nackCount, 1)
 								msg.Nack()
 								continue
 							}
 
 							atomic.AddInt64(&totalProcessedCount, 1)
-							consumerMu.Lock()
-							if _, exists := consumerCounts[consumerID]; !exists {
-								consumerCounts[consumerID] = []string{}
-							}
-							consumerCounts[consumerID] = append(consumerCounts[consumerID], msg.ID)
-							consumerMu.Unlock()
+							received.Record(consumerID, msg.ID)
 							msg.Ack()
 						}
 					}
@@ -533,7 +471,7 @@ func TestRedisLoadTest(t *testing.T) {
 
 			for j := 1; j <= nbConsumersPerStream; j++ {
 				consumerID := fmt.Sprintf("stress-stream-%d-consumer-%d", streamIndex, j)
-				consumerMsgs := snapshot(&consumerMu, consumerCounts, consumerID)
+				consumerMsgs := received.IDs(consumerID)
 				streamConsumerCounts = append(streamConsumerCounts, consumerMsgs)
 				totalMsgsForStream += len(consumerMsgs)
 			}
@@ -556,7 +494,7 @@ func TestRedisLoadTest(t *testing.T) {
 			// Verify no duplicates between consumers in same stream
 			for i := 0; i < len(streamConsumerCounts); i++ {
 				for j := i + 1; j < len(streamConsumerCounts); j++ {
-					duplicates := findDuplicateMessages(streamConsumerCounts[i], streamConsumerCounts[j])
+					duplicates := loadtest.Duplicates(streamConsumerCounts[i], streamConsumerCounts[j])
 					g.Expect(duplicates).To(BeEmpty(),
 						"Found duplicates between consumers %d and %d in stream %d", i+1, j+1, streamIndex)
 				}
