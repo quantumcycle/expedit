@@ -151,9 +151,13 @@ func TestRedisSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			startReceive(t, sub1, handlerFor("consumer-1"))
 
+			// Same group options as sub1: the two start concurrently, and the first one to run creates the stream and
+			// the group, which must then include the messages added before the other one starts reading
 			sub2, err := subredis.NewRedisSubscriber(setup.client,
 				stream,
 				subredis.WithConsumerGroup("test-group"),
+				subredis.WithConsumerGroupCreateStreamIfMissing(true),
+				subredis.WithConsumerGroupStartID(subredis.StartFromBeginning),
 				subredis.WithMaxInFlight(1),
 				subredis.WithBlockTimeout(50*time.Millisecond))
 			g.Expect(err).NotTo(HaveOccurred())
