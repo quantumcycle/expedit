@@ -85,7 +85,7 @@ func (t *simpleToxiproxy) Cleanup() {
 	}
 }
 
-func asyncCountMessages(count *int, ch <-chan *message.Message, duration time.Duration) {
+func asyncCountMessages(count *atomic.Int32, ch <-chan *message.Message, duration time.Duration) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), duration)
 		defer cancel()
@@ -97,13 +97,12 @@ func asyncCountMessages(count *int, ch <-chan *message.Message, duration time.Du
 				if msg == nil {
 					return
 				}
-				*count++
+				count.Add(1)
 				msg.Ack()
 			}
 		}
 	}()
 }
-
 
 func createTestConnectionWithToxiproxy(toxi *simpleToxiproxy) (*amqp.ReconnectingConnection, *amqp.ReconnectingChannel, error) {
 	config := amqpgo.Config{
@@ -182,7 +181,7 @@ func TestAMQPSubscriber(t *testing.T) {
 
 		_, err = subscriber.Subscribe(ctx)
 		g.Expect(err).To(HaveOccurred())
-		g.Expect(err).To(MatchError("queue does not exist"))
+		g.Expect(err).To(MatchError(amqp.ErrQueueNotFound))
 	})
 
 	t.Run("when using a direct queue", func(t *testing.T) {
@@ -224,7 +223,7 @@ func TestAMQPSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
-			msgCount := 0
+			var msgCount atomic.Int32
 			ready := make(chan struct{})
 
 			go func() {
@@ -240,7 +239,7 @@ func TestAMQPSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						msgCount++
+						msgCount.Add(1)
 						msg.Ack()
 					}
 				}
@@ -257,7 +256,7 @@ func TestAMQPSubscriber(t *testing.T) {
 			}
 
 			g.Eventually(func() int {
-				return msgCount
+				return int(msgCount.Load())
 			}, 2*time.Second, 50*time.Millisecond).Should(Equal(expectedMsgCount))
 		})
 	})
@@ -306,7 +305,7 @@ func TestAMQPSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
-			msgCount := 0
+			var msgCount atomic.Int32
 			asyncCountMessages(&msgCount, msgCh, 10*time.Second)
 
 			expectedMsgCount := 10
@@ -325,7 +324,7 @@ func TestAMQPSubscriber(t *testing.T) {
 			}
 
 			g.Eventually(func() int {
-				current := msgCount
+				current := int(msgCount.Load())
 				fmt.Printf("Current message count: %d/%d\n", current, expectedMsgCount)
 				return current
 			}, 8*time.Second, 500*time.Millisecond).Should(Equal(expectedMsgCount))
@@ -584,9 +583,9 @@ func TestAMQPSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer alertsSubscriber.Close()
 
-			logsCount := 0
-			eventsCount := 0
-			alertsCount := 0
+			var logsCount atomic.Int32
+			var eventsCount atomic.Int32
+			var alertsCount atomic.Int32
 
 			ready := make(chan struct{}, 3)
 
@@ -601,7 +600,7 @@ func TestAMQPSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						logsCount++
+						logsCount.Add(1)
 						msg.Ack()
 					}
 				}
@@ -618,7 +617,7 @@ func TestAMQPSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						eventsCount++
+						eventsCount.Add(1)
 						msg.Ack()
 					}
 				}
@@ -635,7 +634,7 @@ func TestAMQPSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						alertsCount++
+						alertsCount.Add(1)
 						msg.Ack()
 					}
 				}
@@ -665,15 +664,15 @@ func TestAMQPSubscriber(t *testing.T) {
 			}
 
 			g.Eventually(func() int {
-				return logsCount
+				return int(logsCount.Load())
 			}, 3*time.Second, 50*time.Millisecond).Should(Equal(2))
 
 			g.Eventually(func() int {
-				return eventsCount
+				return int(eventsCount.Load())
 			}, 3*time.Second, 50*time.Millisecond).Should(Equal(2))
 
 			g.Eventually(func() int {
-				return alertsCount
+				return int(alertsCount.Load())
 			}, 3*time.Second, 50*time.Millisecond).Should(Equal(1))
 		})
 
@@ -869,8 +868,8 @@ func TestAMQPSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer anyUrgentSub.Close()
 
-			errorCriticalCount := 0
-			anyUrgentCount := 0
+			var errorCriticalCount atomic.Int32
+			var anyUrgentCount atomic.Int32
 
 			ready := make(chan struct{}, 2)
 
@@ -885,7 +884,7 @@ func TestAMQPSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						errorCriticalCount++
+						errorCriticalCount.Add(1)
 						msg.Ack()
 					}
 				}
@@ -902,7 +901,7 @@ func TestAMQPSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						anyUrgentCount++
+						anyUrgentCount.Add(1)
 						msg.Ack()
 					}
 				}
@@ -931,11 +930,11 @@ func TestAMQPSubscriber(t *testing.T) {
 			}
 
 			g.Eventually(func() int {
-				return errorCriticalCount
+				return int(errorCriticalCount.Load())
 			}, 2*time.Second, 50*time.Millisecond).Should(Equal(2))
 
 			g.Eventually(func() int {
-				return anyUrgentCount
+				return int(anyUrgentCount.Load())
 			}, 2*time.Second, 50*time.Millisecond).Should(Equal(4))
 		})
 	})
@@ -1105,11 +1104,11 @@ func TestAMQPSubscriber(t *testing.T) {
 			})
 
 			var receivedData TestData
-			var messageReceived bool
+			var messageReceived atomic.Bool
 
 			router.AddHandler("default").Handle(func(msg *message.Message) error {
 				receivedData = msg.Payload.(TestData)
-				messageReceived = true
+				messageReceived.Store(true)
 				return nil
 			})
 
@@ -1126,7 +1125,7 @@ func TestAMQPSubscriber(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			g.Eventually(func() bool {
-				return messageReceived
+				return messageReceived.Load()
 			}, 2*time.Second, 50*time.Millisecond).Should(BeTrue())
 
 			g.Expect(receivedData).To(Equal(expectedData))
@@ -1206,11 +1205,11 @@ func TestAMQPSubscriber(t *testing.T) {
 			})
 
 			var receivedProduct Product
-			var messageReceived bool
+			var messageReceived atomic.Bool
 
 			router.AddHandler("default").Handle(func(msg *message.Message) error {
 				receivedProduct = msg.Payload.(Product)
-				messageReceived = true
+				messageReceived.Store(true)
 				return nil
 			})
 
@@ -1227,7 +1226,7 @@ func TestAMQPSubscriber(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			g.Eventually(func() bool {
-				return messageReceived
+				return messageReceived.Load()
 			}, 2*time.Second, 50*time.Millisecond).Should(BeTrue())
 
 			g.Expect(receivedProduct).To(Equal(originalProduct))

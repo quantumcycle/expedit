@@ -189,7 +189,7 @@ func NewRedisSubscriber(
 		OnProcessingTimeout: options.onProcessingTimeout,
 	}
 	internalSubscriber := subscriber.MessageSubscriber[*pubsub.Message]{
-		InitializeFn: func(ctx context.Context, outputCh chan *message.Message) error {
+		InitializeFn: func(ctx context.Context, outputCh chan *message.Message, done func(err error)) error {
 			if options.consumerGroup != "" {
 				var err error
 				if options.consumerGroupCreateStreamIfMissing {
@@ -210,6 +210,10 @@ func NewRedisSubscriber(
 
 			uniqueID := shortuuid.New()
 			go func() {
+				// The loop stops on the first read error. The error is reported through done, which closes the output
+				// channel. Retrying is left to the caller. A cancelled context is not reported as an error.
+				var loopErr error
+				defer func() { done(loopErr) }()
 				startID := string(options.startID)
 				for {
 					var err error
@@ -269,6 +273,7 @@ func NewRedisSubscriber(
 						}).Result()
 					}
 					if err != nil {
+						loopErr = err
 						return
 					}
 					if (len(entries) == 0) || (len(entries[0].Messages) == 0) {
@@ -296,6 +301,10 @@ func NewRedisSubscriber(
 
 func (s *Subscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {
 	return s.internalSubscriber.Subscribe(ctx)
+}
+
+func (s *Subscriber) Err() error {
+	return s.internalSubscriber.Err()
 }
 
 func (s *Subscriber) Close() error {

@@ -44,52 +44,50 @@ func (m *Message) WithMetadata(key string, value interface{}) *Message {
 }
 
 func (m *Message) Ack() bool {
-	if m.state == Ack {
-		return true
-	}
-
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-
-	if m.state == Nack {
-		return false
-	}
-
-	m.state = Ack
-	for _, ch := range m.stateChan {
-		ch <- Ack
-	}
-	return true
+	return m.transition(Ack, Nack)
 }
 
 func (m *Message) Nack() bool {
-	if m.state == Nack {
-		return true
-	}
+	return m.transition(Nack, Ack)
+}
 
+// transition moves the message from Processing to the target state and notifies the state listeners.
+// It returns true if the message is in the target state, and false if it is already in the opposite state.
+func (m *Message) transition(target, opposite State) bool {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if m.state == Ack {
+	if m.state == target {
+		return true
+	}
+	if m.state == opposite {
 		return false
 	}
 
-	m.state = Nack
+	m.state = target
 	for _, ch := range m.stateChan {
-		ch <- Nack
+		ch <- target
 	}
 	return true
 }
 
+// StateChange returns a channel that receives the state the message transitions to (Ack or Nack). If the message
+// already left the Processing state, the channel immediately holds the current state, so a late subscriber never
+// misses it.
 func (m *Message) StateChange() <-chan State {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 	ch := make(chan State, 1)
+	if m.state != Processing {
+		ch <- m.state
+	}
 	m.stateChan = append(m.stateChan, ch)
 	return ch
 }
 
 func (m *Message) State() State {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
 	return m.state
 }
 

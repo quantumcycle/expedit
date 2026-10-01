@@ -163,9 +163,9 @@ func TestGooglePublisher(t *testing.T) {
 
 			ExpectMessageCount(g, msgs, 100, 10*time.Second)
 
-			close(msgs)
 			var received []string
-			for s := range msgs {
+			for len(msgs) > 0 {
+				s := <-msgs
 				received = append(received, s)
 			}
 			g.Expect(received).To(HaveExactElements(sentMsgs))
@@ -251,9 +251,9 @@ func TestGooglePublisher(t *testing.T) {
 
 		ExpectMessageCount(g, msgs, 8, 10*time.Second)
 
-		close(msgs)
 		var received []string
-		for s := range msgs {
+		for len(msgs) > 0 {
+			s := <-msgs
 			received = append(received, s)
 		}
 

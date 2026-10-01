@@ -3,13 +3,14 @@ package redis_test
 import (
 	"context"
 	"fmt"
-	"math/rand/v2"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	. "github.com/onsi/gomega"
+	"github.com/quantumcycle/expedit/core/loadtest"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
 	subredis "github.com/quantumcycle/expedit/redis"
@@ -17,28 +18,6 @@ import (
 )
 
 // Shared utilities for Redis load testing
-
-func randomInt(lower int, higher int) int {
-	return rand.IntN(higher-lower+1) + lower
-}
-
-func findDuplicateMessages(msgs1 []string, msgs2 []string) []string {
-	duplicates := []string{}
-	seen := make(map[string]bool)
-
-	// Mark all messages from first list
-	for _, msg := range msgs1 {
-		seen[msg] = true
-	}
-
-	// Check for duplicates in second list
-	for _, msg := range msgs2 {
-		if seen[msg] {
-			duplicates = append(duplicates, msg)
-		}
-	}
-	return duplicates
-}
 
 func generateTestPayload(testID string, messageNum int, size int) map[string]interface{} {
 	data := make([]byte, size)
@@ -91,13 +70,9 @@ func TestRedisLoadTest(t *testing.T) {
 
 		var totalSentCount int64
 		var totalProcessedCount int64
-		var publisherMu sync.Mutex
-		var consumerMu sync.Mutex
-		var publisherCounts map[string][]string
-		var consumerCounts map[string][]string
 
-		publisherCounts = make(map[string][]string)
-		consumerCounts = make(map[string][]string)
+		sent := loadtest.NewRecorder()
+		received := loadtest.NewRecorder()
 
 		nbStreams := 3
 		nbPublishersPerStream := 1
@@ -137,13 +112,9 @@ func TestRedisLoadTest(t *testing.T) {
 								return
 							}
 
+							// Record before counting, so the records are complete once the count is reached
+							received.Record(consumerID, msg.ID)
 							atomic.AddInt64(&totalProcessedCount, 1)
-							consumerMu.Lock()
-							if _, exists := consumerCounts[consumerID]; !exists {
-								consumerCounts[consumerID] = []string{}
-							}
-							consumerCounts[consumerID] = append(consumerCounts[consumerID], msg.ID)
-							consumerMu.Unlock()
 							msg.Ack()
 						}
 					}
@@ -178,12 +149,7 @@ func TestRedisLoadTest(t *testing.T) {
 						g.Expect(err).NotTo(HaveOccurred())
 
 						atomic.AddInt64(&totalSentCount, 1)
-						publisherMu.Lock()
-						if _, exists := publisherCounts[publisherID]; !exists {
-							publisherCounts[publisherID] = []string{}
-						}
-						publisherCounts[publisherID] = append(publisherCounts[publisherID], msg.ID)
-						publisherMu.Unlock()
+						sent.Record(publisherID, msg.ID)
 					}
 				}(streamIndex, pubIndex, stream)
 			}
@@ -203,8 +169,8 @@ func TestRedisLoadTest(t *testing.T) {
 			consumer1ID := fmt.Sprintf("stream-%d-consumer-%d", streamIndex, 1)
 			consumer2ID := fmt.Sprintf("stream-%d-consumer-%d", streamIndex, 2)
 
-			consumer1Msgs := consumerCounts[consumer1ID]
-			consumer2Msgs := consumerCounts[consumer2ID]
+			consumer1Msgs := received.IDs(consumer1ID)
+			consumer2Msgs := received.IDs(consumer2ID)
 
 			totalMsgsForStream := len(consumer1Msgs) + len(consumer2Msgs)
 			expectedMsgsForStream := nbPublishersPerStream * nbMessagesToSendPerPublisher
@@ -212,7 +178,7 @@ func TestRedisLoadTest(t *testing.T) {
 			g.Expect(totalMsgsForStream).To(Equal(expectedMsgsForStream))
 
 			// Verify no message duplication
-			duplicates := findDuplicateMessages(consumer1Msgs, consumer2Msgs)
+			duplicates := loadtest.Duplicates(consumer1Msgs, consumer2Msgs)
 			g.Expect(duplicates).To(BeEmpty())
 		}
 	})
@@ -230,10 +196,8 @@ func TestRedisLoadTest(t *testing.T) {
 		var totalSentCount int64
 		var totalProcessedCount int64
 		var nackCount int64
-		var consumerMu sync.Mutex
-		var consumerCounts map[string][]string
 
-		consumerCounts = make(map[string][]string)
+		received := loadtest.NewRecorder()
 		nbMessagesToSend := 300
 		nackRate := 10 // 10% nack rate for failing consumers
 
@@ -274,7 +238,7 @@ func TestRedisLoadTest(t *testing.T) {
 						processedByThisConsumer++
 
 						// Simulate failure - nack messages and crash after processing some
-						if randomInt(1, 100) <= nackRate || processedByThisConsumer > 50 {
+						if loadtest.RandomInt(1, 100) <= nackRate || processedByThisConsumer > 50 {
 							atomic.AddInt64(&nackCount, 1)
 							msg.Nack()
 							if processedByThisConsumer > 50 {
@@ -283,13 +247,9 @@ func TestRedisLoadTest(t *testing.T) {
 							continue
 						}
 
+						// Record before counting, so the records are complete once the count is reached
+						received.Record(consumerID, msg.ID)
 						atomic.AddInt64(&totalProcessedCount, 1)
-						consumerMu.Lock()
-						if _, exists := consumerCounts[consumerID]; !exists {
-							consumerCounts[consumerID] = []string{}
-						}
-						consumerCounts[consumerID] = append(consumerCounts[consumerID], msg.ID)
-						consumerMu.Unlock()
 						msg.Ack()
 					}
 				}
@@ -357,13 +317,9 @@ func TestRedisLoadTest(t *testing.T) {
 							return
 						}
 
+						// Record before counting, so the records are complete once the count is reached
+						received.Record(consumerID, msg.ID)
 						atomic.AddInt64(&totalProcessedCount, 1)
-						consumerMu.Lock()
-						if _, exists := consumerCounts[consumerID]; !exists {
-							consumerCounts[consumerID] = []string{}
-						}
-						consumerCounts[consumerID] = append(consumerCounts[consumerID], msg.ID)
-						consumerMu.Unlock()
 						msg.Ack()
 					}
 				}
@@ -376,11 +332,11 @@ func TestRedisLoadTest(t *testing.T) {
 		}, 30*time.Second).Should(Equal(int64(nbMessagesToSend)))
 
 		// Verify we had some nacks (simulated failures)
-		g.Expect(nackCount).To(BeNumerically(">", 0))
+		g.Expect(atomic.LoadInt64(&nackCount)).To(BeNumerically(">", 0))
 
 		// Verify recovery consumers processed some messages
-		recoveryConsumer1Msgs := consumerCounts["recovery-consumer-1"]
-		recoveryConsumer2Msgs := consumerCounts["recovery-consumer-2"]
+		recoveryConsumer1Msgs := received.IDs("recovery-consumer-1")
+		recoveryConsumer2Msgs := received.IDs("recovery-consumer-2")
 		totalRecoveryMsgs := len(recoveryConsumer1Msgs) + len(recoveryConsumer2Msgs)
 
 		g.Expect(totalRecoveryMsgs).To(BeNumerically(">", 0),
@@ -395,12 +351,12 @@ func TestRedisLoadTest(t *testing.T) {
 		defer cancel()
 
 		var totalSentCount int64
-		var totalProcessedCount int64
-		var nackCount int64
-		var consumerMu sync.Mutex
-		var consumerCounts map[string][]string
 
-		consumerCounts = make(map[string][]string)
+		// Keyed by consumer
+		received := loadtest.NewRecorder()
+		// Keyed by stream. Redis does not redeliver a nacked message before the pending idle timeout, so a nacked
+		// message is usually not received again during the test.
+		nacked := loadtest.NewRecorder()
 
 		nbStreams := 2
 		nbPublishers := 3
@@ -443,19 +399,13 @@ func TestRedisLoadTest(t *testing.T) {
 							}
 
 							// Simulate occasional errors
-							if randomInt(1, 100) <= nackRate {
-								atomic.AddInt64(&nackCount, 1)
+							if loadtest.RandomInt(1, 100) <= nackRate {
+								nacked.Record(strconv.Itoa(streamIndex), msg.ID)
 								msg.Nack()
 								continue
 							}
 
-							atomic.AddInt64(&totalProcessedCount, 1)
-							consumerMu.Lock()
-							if _, exists := consumerCounts[consumerID]; !exists {
-								consumerCounts[consumerID] = []string{}
-							}
-							consumerCounts[consumerID] = append(consumerCounts[consumerID], msg.ID)
-							consumerMu.Unlock()
+							received.Record(consumerID, msg.ID)
 							msg.Ack()
 						}
 					}
@@ -503,34 +453,30 @@ func TestRedisLoadTest(t *testing.T) {
 		// Wait for all publishers to complete
 		publisherWg.Wait()
 
-		// Calculate expected totals accounting for stream distribution
-		totalExpected := int64(nbPublishers * nbMessagesToSendPerPublisher)
-
-		// Wait for processing to complete
-		// Note: Some messages may be nacked and not reprocessed, so we check that
-		// processed + nacked >= sent (i.e., all messages were at least attempted)
-		g.Eventually(func() bool {
-			processed := atomic.LoadInt64(&totalProcessedCount)
-			sent := atomic.LoadInt64(&totalSentCount)
-			nacked := atomic.LoadInt64(&nackCount)
-			return (processed+nacked) >= sent && sent == totalExpected
-		}, 30*time.Second).Should(BeTrue())
-
-		// Verify we had some nacks due to simulated errors
-		g.Expect(nackCount).To(BeNumerically(">=", 0))
-
-		// Verify consumer distribution
-		for streamIndex := 0; streamIndex < nbStreams; streamIndex++ {
-			var totalMsgsForStream int
-			var streamConsumerCounts [][]string
-
+		consumerIDs := func(streamIndex int) []string {
+			ids := make([]string, 0, nbConsumersPerStream)
 			for j := 1; j <= nbConsumersPerStream; j++ {
-				consumerID := fmt.Sprintf("stress-stream-%d-consumer-%d", streamIndex, j)
-				consumerMsgs := consumerCounts[consumerID]
-				streamConsumerCounts = append(streamConsumerCounts, consumerMsgs)
-				totalMsgsForStream += len(consumerMsgs)
+				ids = append(ids, fmt.Sprintf("stress-stream-%d-consumer-%d", streamIndex, j))
 			}
+			return ids
+		}
+		// seen returns the IDs of the stream messages that were either processed or nacked
+		seen := func(streamIndex int) map[string]bool {
+			ids := map[string]bool{}
+			for _, consumerID := range consumerIDs(streamIndex) {
+				for _, id := range received.IDs(consumerID) {
+					ids[id] = true
+				}
+			}
+			for _, id := range nacked.IDs(strconv.Itoa(streamIndex)) {
+				ids[id] = true
+			}
+			return ids
+		}
 
+		g.Expect(atomic.LoadInt64(&totalSentCount)).To(Equal(int64(nbPublishers * nbMessagesToSendPerPublisher)))
+
+		for streamIndex := 0; streamIndex < nbStreams; streamIndex++ {
 			// Calculate how many publishers were assigned to this stream (round-robin)
 			publishersForStream := 0
 			for pubIndex := 0; pubIndex < nbPublishers; pubIndex++ {
@@ -540,16 +486,20 @@ func TestRedisLoadTest(t *testing.T) {
 			}
 			expectedMsgsForStream := publishersForStream * nbMessagesToSendPerPublisher
 
-			// Allow for nacked messages that may not be reprocessed
-			minExpectedForStream := expectedMsgsForStream - 10 // Allow up to 10 messages to be nacked per stream
-			g.Expect(totalMsgsForStream).To(BeNumerically(">=", minExpectedForStream),
-				"Stream %d should have processed close to %d messages, got %d",
-				streamIndex, expectedMsgsForStream, totalMsgsForStream)
+			// Every message must be handled, either processed or nacked
+			g.Eventually(func() int {
+				return len(seen(streamIndex))
+			}, 30*time.Second).Should(Equal(expectedMsgsForStream), "Stream %d should have handled all its messages", streamIndex)
+
+			var streamConsumerCounts [][]string
+			for _, consumerID := range consumerIDs(streamIndex) {
+				streamConsumerCounts = append(streamConsumerCounts, received.IDs(consumerID))
+			}
 
 			// Verify no duplicates between consumers in same stream
 			for i := 0; i < len(streamConsumerCounts); i++ {
 				for j := i + 1; j < len(streamConsumerCounts); j++ {
-					duplicates := findDuplicateMessages(streamConsumerCounts[i], streamConsumerCounts[j])
+					duplicates := loadtest.Duplicates(streamConsumerCounts[i], streamConsumerCounts[j])
 					g.Expect(duplicates).To(BeEmpty(),
 						"Found duplicates between consumers %d and %d in stream %d", i+1, j+1, streamIndex)
 				}

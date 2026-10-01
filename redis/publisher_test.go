@@ -239,7 +239,7 @@ func TestRedisPublisher(t *testing.T) {
 			pubEngine := publisher.NewPublishingEngine(pub)
 			msg := message.NewMessage(context.Background(), map[string]interface{}{"test": "value"})
 			msg = msg.WithMetadata("user", "john").WithMetadata("action", "login")
-			
+
 			err = pubEngine.Publish(msg)
 			g.Expect(err).NotTo(HaveOccurred())
 
@@ -250,7 +250,7 @@ func TestRedisPublisher(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(messages).To(HaveLen(1))
 			g.Expect(messages[0].Messages).To(HaveLen(1))
-			
+
 			values := messages[0].Messages[0].Values
 			g.Expect(values).To(HaveKey("meta_user"))
 			g.Expect(values).To(HaveKey("meta_action"))
@@ -272,7 +272,7 @@ func TestRedisPublisher(t *testing.T) {
 			pubEngine := publisher.NewPublishingEngine(pub)
 			msg := message.NewMessage(context.Background(), map[string]interface{}{"test": "value"})
 			msg = msg.WithMetadata("user", "john")
-			
+
 			err = pubEngine.Publish(msg)
 			g.Expect(err).NotTo(HaveOccurred())
 

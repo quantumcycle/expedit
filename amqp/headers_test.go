@@ -382,7 +382,7 @@ func TestAMQPHeaders(t *testing.T) {
 	t.Run("Integration Tests", func(t *testing.T) {
 		t.Run("should publish with a header provider", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			
+
 			var conn *amqp.ReconnectingConnection
 			var channel *amqp.ReconnectingChannel
 			var testExchange string

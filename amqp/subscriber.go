@@ -97,8 +97,8 @@ func NewAMQPSubscriber(channel *ReconnectingChannel, queue string, opts ...Subsc
 	}
 
 	internalSubscriber := subscriber.MessageSubscriber[*amqp.Delivery]{
-		InitializeFn: func(ctx context.Context, outputCh chan *message.Message) error {
-			msgsCh, err := channel.Consume(queue, "",
+		InitializeFn: func(ctx context.Context, outputCh chan *message.Message, done func(err error)) error {
+			msgsCh, err := channel.Consume(ctx, queue, "",
 				options.autoAck,
 				options.exclusive,
 				false,
@@ -110,10 +110,15 @@ func NewAMQPSubscriber(channel *ReconnectingChannel, queue string, opts ...Subsc
 			go func() {
 				for {
 					select {
-					case msg := <-msgsCh:
+					case msg, ok := <-msgsCh:
+						if !ok {
+							done(errors.New("amqp channel closed"))
+							return
+						}
 						processor.ProcessMessage(ctx, &msg, outputCh)
 					case <-ctx.Done():
 						//TODO test the context cancelled case
+						done(nil)
 						return
 					}
 				}
@@ -129,6 +134,10 @@ func NewAMQPSubscriber(channel *ReconnectingChannel, queue string, opts ...Subsc
 
 func (s *Subscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {
 	return s.internalSubscriber.Subscribe(ctx)
+}
+
+func (s *Subscriber) Err() error {
+	return s.internalSubscriber.Err()
 }
 
 func (s *Subscriber) Close() error {

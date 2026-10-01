@@ -3,7 +3,6 @@ package amqp_test
 import (
 	"context"
 	"fmt"
-	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/amqp"
 	"github.com/quantumcycle/expedit/amqp/testrabbit"
+	"github.com/quantumcycle/expedit/core/loadtest"
 	amqpgo "github.com/rabbitmq/amqp091-go"
 )
 
@@ -67,22 +67,6 @@ func createLoadTestConnection() (*amqp.ReconnectingConnection, *amqp.Reconnectin
 	return conn, channel, nil
 }
 
-func findDuplicateMessages(msgs1 []string, msgs2 []string) []string {
-	duplicates := []string{}
-	for _, msg1 := range msgs1 {
-		for _, msg2 := range msgs2 {
-			if msg1 == msg2 {
-				duplicates = append(duplicates, msg1)
-			}
-		}
-	}
-	return duplicates
-}
-
-func randomInt(lower int, higher int) int {
-	return rand.IntN(higher-lower+1) + lower
-}
-
 func setupAMQPLoadTest(t *testing.T) (*amqp.ReconnectingConnection, *amqp.ReconnectingChannel, []testrabbit.DirectQueue) {
 	var err error
 	// Use the improved connection helper
@@ -120,12 +104,8 @@ func TestAMQPLoadTest(t *testing.T) {
 		defer cancel()
 
 		var totalSentCount int64
-		var totalProcessedCount int64
-		var nackCount int64
-		var consumerMu sync.Mutex
-		var consumerCounts map[string][]string
 
-		consumerCounts = make(map[string][]string)
+		received := loadtest.NewRecorder()
 		nbMessagesToSendPerQueue := 100
 
 		// Track consumer readiness
@@ -163,21 +143,13 @@ func TestAMQPLoadTest(t *testing.T) {
 							}
 
 							// Small error rate for testing robustness
-							if randomInt(1, 1000) <= 5 { // 0.5% failure rate
-								atomic.AddInt64(&nackCount, 1)
+							if loadtest.RandomInt(1, 1000) <= 5 { // 0.5% failure rate
 								msg.Nack()
 								continue
 							}
 
-							atomic.AddInt64(&totalProcessedCount, 1)
-							consumerMu.Lock()
-							if _, exists := consumerCounts[consumerID]; !exists {
-								consumerCounts[consumerID] = []string{}
-							}
 							// Use payload content as identifier since message ID might be empty
-							msgContent := string(msg.Payload.([]byte))
-							consumerCounts[consumerID] = append(consumerCounts[consumerID], msgContent)
-							consumerMu.Unlock()
+							received.Record(consumerID, string(msg.Payload.([]byte)))
 							msg.Ack()
 
 						case <-ctx.Done():
@@ -250,42 +222,23 @@ func TestAMQPLoadTest(t *testing.T) {
 		// We have 3 queues * 100 messages = 300 total messages
 		totalExpectedMessages := int64(len(queues) * nbMessagesToSendPerQueue)
 
-		// Wait for processing to complete - we expect close to totalExpectedMessages
-		// but some messages might be nacked and not requeued
-		g.Eventually(func() bool {
-			processed := atomic.LoadInt64(&totalProcessedCount)
-			nacked := atomic.LoadInt64(&nackCount)
-			sent := atomic.LoadInt64(&totalSentCount)
+		g.Expect(atomic.LoadInt64(&totalSentCount)).To(Equal(totalExpectedMessages))
 
-			// We should have processed + nacked close to what we sent
-			// Allow for small variance due to timing
-			return (processed+nacked) >= (sent-5) && sent == totalExpectedMessages
-		}, "30s", "1s").Should(BeTrue(),
-			"Expected close to %d messages to be processed+nacked, but got %d processed + %d nacked = %d total. Sent: %d",
-			totalExpectedMessages, atomic.LoadInt64(&totalProcessedCount), atomic.LoadInt64(&nackCount),
-			atomic.LoadInt64(&totalProcessedCount)+atomic.LoadInt64(&nackCount), atomic.LoadInt64(&totalSentCount))
-
-		// Should have some random nacks due to simulated errors (0.5% rate may result in 0-3 nacks)
-		g.Expect(nackCount).To(BeNumerically(">=", int64(0)), "Expected 0 or more messages to be nacked due to simulated errors")
-
-		// Verify message distribution across consumers
-		// Each queue should have received close to nbMessagesToSendPerQueue messages (accounting for nacks)
+		// Nacked messages are requeued, so every message must eventually be processed
 		for queueIndex := range queues {
 			consumer1ID := fmt.Sprintf("queue-%d-consumer-%d", queueIndex, 1)
 			consumer2ID := fmt.Sprintf("queue-%d-consumer-%d", queueIndex, 2)
 
-			consumer1Msgs := consumerCounts[consumer1ID]
-			consumer2Msgs := consumerCounts[consumer2ID]
+			g.Eventually(func() int {
+				return received.Count(consumer1ID) + received.Count(consumer2ID)
+			}, "30s", "100ms").Should(Equal(nbMessagesToSendPerQueue),
+				"Queue %d should have processed all its messages", queueIndex)
 
-			totalMsgsForQueue := len(consumer1Msgs) + len(consumer2Msgs)
-			// Allow for variance due to nacked messages and load test timing
-			expectedMinMessages := nbMessagesToSendPerQueue - 5 // Allow for up to 5 messages to be lost/nacked
-			g.Expect(totalMsgsForQueue).To(BeNumerically(">=", expectedMinMessages),
-				"Queue %d should have received close to %d messages, but got %d (consumer1: %d, consumer2: %d)",
-				queueIndex, nbMessagesToSendPerQueue, totalMsgsForQueue, len(consumer1Msgs), len(consumer2Msgs))
+			consumer1Msgs := received.IDs(consumer1ID)
+			consumer2Msgs := received.IDs(consumer2ID)
 
 			// Verify no message duplication between consumers
-			duplicates := findDuplicateMessages(consumer1Msgs, consumer2Msgs)
+			duplicates := loadtest.Duplicates(consumer1Msgs, consumer2Msgs)
 			g.Expect(duplicates).To(BeEmpty(), "Found duplicate messages between consumers for queue %d: %v", queueIndex, duplicates)
 		}
 	})

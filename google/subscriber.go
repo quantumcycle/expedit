@@ -104,17 +104,18 @@ func NewGoogleSubscriber(
 		OnProcessingTimeout: options.onProcessingTimeout,
 	}
 	internalSubscriber := subscriber.MessageSubscriber[*pubsub.Message]{
-		InitializeFn: func(ctx context.Context, outputCh chan *message.Message) error {
+		InitializeFn: func(ctx context.Context, outputCh chan *message.Message, done func(err error)) error {
 			sub := c.Subscription(subscription)
 			if ok, err := sub.Exists(ctx); !ok || err != nil {
 				return errors.New("subscription does not exist")
 			}
 			sub.ReceiveSettings = options.receiveSettings
 			go func() {
-				sub.Receive(ctx,
+				// Receive returns nil when ctx is cancelled, any other error is terminal.
+				done(sub.Receive(ctx,
 					func(ctx context.Context, pubMsg *pubsub.Message) {
 						processor.ProcessMessage(ctx, pubMsg, outputCh)
-					})
+					}))
 			}()
 			return nil
 		},
@@ -148,6 +149,10 @@ func parseAsPrimitiveType(v string) interface{} {
 
 func (s *Subscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {
 	return s.internalSubscriber.Subscribe(ctx)
+}
+
+func (s *Subscriber) Err() error {
+	return s.internalSubscriber.Err()
 }
 
 func (s *Subscriber) Close() error {

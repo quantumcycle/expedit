@@ -23,6 +23,8 @@ func NewPublishingEngine(pub Publisher) *PublishingEngine {
 }
 
 func (p *PublishingEngine) AddMiddleware(m middleware.Middleware) *PublishingEngine {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 	if p.handlerFn != nil {
 		panic("cannot add middleware after publishing has started")
 	}
@@ -32,15 +34,14 @@ func (p *PublishingEngine) AddMiddleware(m middleware.Middleware) *PublishingEng
 
 // Publish publishes the messages to the destination topic calculated by the routing function.
 func (p *PublishingEngine) Publish(msg *message.Message) error {
+	p.lock.Lock()
 	if p.handlerFn == nil {
-		p.lock.Lock()
-		defer p.lock.Unlock()
-		if p.handlerFn == nil {
-			p.handlerFn = p.mc.Wrap(func(msg *message.Message) error {
-				return p.pub.Publish(msg)
-			})
-		}
+		p.handlerFn = p.mc.Wrap(func(msg *message.Message) error {
+			return p.pub.Publish(msg)
+		})
 	}
+	handlerFn := p.handlerFn
+	p.lock.Unlock()
 
-	return p.handlerFn(msg)
+	return handlerFn(msg)
 }

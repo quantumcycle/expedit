@@ -31,7 +31,7 @@ func TestJSONUtilities(t *testing.T) {
 
 			g.Expect(result).To(HaveKey("data"))
 			g.Expect(result["data"]).To(BeAssignableToTypeOf([]byte{}))
-			
+
 			// Verify it's valid JSON
 			jsonData := result["data"].([]byte)
 			g.Expect(string(jsonData)).To(ContainSubstring("\"name\":\"test\""))
@@ -105,7 +105,7 @@ func TestJSONUtilities(t *testing.T) {
 
 			middleware := subredis.UnmarshallMapPayloadFromJson("json_payload", TestStruct{})
 			handlerCalled := false
-			
+
 			handler := func(msg *message.Message) error {
 				handlerCalled = true
 				// Verify payload was unmarshalled to struct
@@ -134,7 +134,7 @@ func TestJSONUtilities(t *testing.T) {
 
 			middleware := subredis.UnmarshallMapPayloadFromJson("json_payload", TestStruct{})
 			handlerCalled := false
-			
+
 			handler := func(msg *message.Message) error {
 				handlerCalled = true
 				structPayload := msg.Payload.(TestStruct)
@@ -238,7 +238,7 @@ func TestJSONUtilities(t *testing.T) {
 
 			middleware := subredis.UnmarshallMapPayloadFromJson("json_payload", "")
 			handlerCalled := false
-			
+
 			handler := func(msg *message.Message) error {
 				handlerCalled = true
 				stringPayload, ok := msg.Payload.(string)
@@ -265,7 +265,7 @@ func TestJSONUtilities(t *testing.T) {
 
 			middleware := subredis.UnmarshallMapPayloadFromJson("json_payload", TestStruct{})
 			handlerError := fmt.Errorf("handler error")
-			
+
 			handler := func(msg *message.Message) error {
 				return handlerError
 			}

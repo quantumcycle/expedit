@@ -2,12 +2,14 @@
 package google_test
 
 import (
-	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
-	"github.com/lithammer/shortuuid/v3"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"cloud.google.com/go/pubsub"
+	"github.com/lithammer/shortuuid/v3"
 
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/core/message"
@@ -68,7 +70,7 @@ func ExpectMessageCount[T any](g Gomega, ch <-chan T, expectedCount int, timeout
 }
 
 // AsyncCountMessages counts messages in a channel for a specified duration
-func AsyncCountMessages(count *int, ch <-chan *message.Message, duration time.Duration) {
+func AsyncCountMessages(count *atomic.Int32, ch <-chan *message.Message, duration time.Duration) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), duration)
 		defer cancel()
@@ -77,7 +79,7 @@ func AsyncCountMessages(count *int, ch <-chan *message.Message, duration time.Du
 			case <-ctx.Done():
 				return
 			case <-ch:
-				*count++
+				count.Add(1)
 			}
 		}
 	}()
@@ -122,24 +124,6 @@ func NewLoadTestSetup(t *testing.T, topicCount, subsPerTopic int) *LoadTestSetup
 		Topics:    topics,
 		Subs:      subs,
 	}
-}
-
-// FindMissingMessages compares sent and received message lists and returns missing messages
-func FindMissingMessages(sentMsgs []string, receivedMsgs []string) []string {
-	missing := []string{}
-	for _, sentMsg := range sentMsgs {
-		found := false
-		for _, receivedMsg := range receivedMsgs {
-			if sentMsg == receivedMsg {
-				found = true
-				break
-			}
-		}
-		if !found {
-			missing = append(missing, sentMsg)
-		}
-	}
-	return missing
 }
 
 // UniqueSubscriptionName generates a unique subscription name for tests
