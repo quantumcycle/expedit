@@ -69,7 +69,7 @@ Check the code in the [examples](examples/) folder for working examples.
 | Impl              | Status  | Notes                                                        |
 |-------------------|:-------:|--------------------------------------------------------------|
 | Golang channel    |  Beta   | Publisher and subscriber written                             |
-| Google GCP Pubsub |  Beta   | Publisher and subscriber written                             |
+| Google GCP Pubsub |  Beta   | Publisher and subscriber written, on the Pub/Sub Go SDK v2   |
 | Redis stream      |  Beta   | Publisher and subscriber written                             |
 | AMQP (Rabbit MQ)  |  Beta   | Publisher, subscriber, examples, and load tests implemented. |
 | Kafka             | Planned |                                                              |
@@ -243,7 +243,7 @@ A received message is acknowledged from the result of its handler, see [Subscrib
    - Start with [Universal Messaging Patterns](MESSAGING_PATTERNS.md) for general concepts
    - Check implementation-specific guides (e.g., [Google Pub/Sub Patterns](google/USAGE_PATTERNS.md))
 
-2. **🔧 Choose your implementation**:
+2. **🔧 Choose your implementation** (all modules require Go 1.25 or later):
    - Google Pub/Sub: `go get github.com/quantumcycle/expedit/google`
    - Redis Streams: `go get github.com/quantumcycle/expedit/redis`
    - AMQP/RabbitMQ: `go get github.com/quantumcycle/expedit/amqp`

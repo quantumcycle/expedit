@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	"github.com/lithammer/shortuuid/v3"
 
 	. "github.com/onsi/gomega"

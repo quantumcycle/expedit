@@ -1,7 +1,8 @@
 package emulator
 
 import (
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
+	"cloud.google.com/go/pubsub/v2/apiv1/pubsubpb"
 	"context"
 	"fmt"
 	"github.com/lithammer/shortuuid/v3"
@@ -41,7 +42,9 @@ func (c PubsubTestClient) CreateTestTopic(ctx context.Context, identifier string
 	//topic name must start with a letter, so we use ID, but make all of the test topics start with T
 	prefix := fmt.Sprintf("T%s", shortuuid.New())
 	topicName := fmt.Sprintf("%s%s", prefix, identifier)
-	_, err := c.client.CreateTopic(ctx, topicName)
+	_, err := c.client.TopicAdminClient.CreateTopic(ctx, &pubsubpb.Topic{
+		Name: topicPath(c.client, topicName),
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -54,7 +57,9 @@ func (c PubsubTestClient) CreateTestTopic(ctx context.Context, identifier string
 }
 
 func (tt TestTopic) Delete(ctx context.Context) {
-	err := tt.client.Topic(string(tt.Name)).Delete(ctx)
+	err := tt.client.TopicAdminClient.DeleteTopic(ctx, &pubsubpb.DeleteTopicRequest{
+		Topic: topicPath(tt.client, string(tt.Name)),
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -69,9 +74,9 @@ type TestSubscription struct {
 
 func (tt TestTopic) CreateTestSubscription(ctx context.Context, identifier string, ordered bool) *TestSubscription {
 	subsName := fmt.Sprintf("%s%s", tt.Prefix, identifier)
-	topic := tt.client.Topic(string(tt.Name))
-	_, err := tt.client.CreateSubscription(ctx, subsName, pubsub.SubscriptionConfig{
-		Topic:                 topic,
+	_, err := tt.client.SubscriptionAdminClient.CreateSubscription(ctx, &pubsubpb.Subscription{
+		Name:                  subscriptionPath(tt.client, subsName),
+		Topic:                 topicPath(tt.client, string(tt.Name)),
 		EnableMessageOrdering: ordered,
 	})
 	if err != nil {
@@ -86,8 +91,9 @@ func (tt TestTopic) CreateTestSubscription(ctx context.Context, identifier strin
 }
 
 func (tt TestTopic) PublishBytes(ctx context.Context, bytes []byte, attrs map[string]string) string {
-	topic := tt.client.Topic(string(tt.Name))
-	r := topic.Publish(ctx, &pubsub.Message{
+	topicPublisher := tt.client.Publisher(string(tt.Name))
+	defer topicPublisher.Stop()
+	r := topicPublisher.Publish(ctx, &pubsub.Message{
 		Attributes: attrs,
 		Data:       bytes,
 	})
@@ -99,7 +105,9 @@ func (tt TestTopic) PublishBytes(ctx context.Context, bytes []byte, attrs map[st
 }
 
 func (ts TestSubscription) Delete(ctx context.Context) {
-	err := ts.client.Subscription(ts.Name).Delete(ctx)
+	err := ts.client.SubscriptionAdminClient.DeleteSubscription(ctx, &pubsubpb.DeleteSubscriptionRequest{
+		Subscription: subscriptionPath(ts.client, ts.Name),
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -108,7 +116,7 @@ func (ts TestSubscription) Delete(ctx context.Context) {
 func (ts TestSubscription) MessageChannel(ctx context.Context, size int) chan *pubsub.Message {
 	ch := make(chan *pubsub.Message, size)
 	go func() {
-		err := ts.client.Subscription(ts.Name).Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
+		err := ts.client.Subscriber(ts.Name).Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
 			m.Ack()
 			ch <- m
 		})
@@ -122,7 +130,7 @@ func (ts TestSubscription) MessageChannel(ctx context.Context, size int) chan *p
 func (ts TestSubscription) MessageDataChannel(ctx context.Context, size int) chan string {
 	ch := make(chan string, size)
 	go func() {
-		err := ts.client.Subscription(ts.Name).Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
+		err := ts.client.Subscriber(ts.Name).Receive(ctx, func(ctx context.Context, m *pubsub.Message) {
 			m.Ack()
 			ch <- string(m.Data)
 		})
@@ -131,4 +139,12 @@ func (ts TestSubscription) MessageDataChannel(ctx context.Context, size int) cha
 		}
 	}()
 	return ch
+}
+
+func topicPath(client *pubsub.Client, topic string) string {
+	return fmt.Sprintf("projects/%s/topics/%s", client.Project(), topic)
+}
+
+func subscriptionPath(client *pubsub.Client, subscription string) string {
+	return fmt.Sprintf("projects/%s/subscriptions/%s", client.Project(), subscription)
 }

@@ -1,8 +1,6 @@
 module github.com/quantumcycle/expedit/core
 
-go 1.22
-
-toolchain go1.22.8
+go 1.25.0
 
 require github.com/onsi/gomega v1.34.2
 

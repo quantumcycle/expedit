@@ -12,6 +12,8 @@ import (
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/publisher"
 	"github.com/quantumcycle/expedit/google"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // setupGooglePublisher creates a Google PubSub test setup for publisher tests
@@ -169,6 +171,26 @@ func TestGooglePublisher(t *testing.T) {
 				received = append(received, s)
 			}
 			g.Expect(received).To(HaveExactElements(sentMsgs))
+		})
+
+		t.Run("should resume the ordering key after a failed publish", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			setup := setupGooglePublisher(t)
+
+			pub, err := google.NewGooglePublisher(setup.Client,
+				publisher.ConstantDestination("missing-topic"),
+				google.WithOrderingKeyProvider(func(msg *message.Message) string {
+					return "test-key"
+				}))
+			g.Expect(err).NotTo(HaveOccurred())
+			defer pub.Close()
+			pubEngine := publisher.NewPublishingEngine(pub)
+
+			for range 2 {
+				// Without resuming, the second publish would fail with pubsub.ErrPublishingPaused instead
+				err = pubEngine.Publish(message.NewMessage(context.Background(), []byte("msg")))
+				g.Expect(status.Code(err)).To(Equal(codes.NotFound))
+			}
 		})
 	})
 

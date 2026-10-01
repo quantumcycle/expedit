@@ -1,8 +1,6 @@
 module github.com/quantumcycle/expedit/amqp
 
-go 1.22
-
-toolchain go1.22.8
+go 1.25.0
 
 require (
 	github.com/Shopify/toxiproxy/v2 v2.11.0
