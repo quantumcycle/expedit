@@ -8,6 +8,8 @@ This document provides comprehensive examples of Google Pub/Sub-specific usage p
 
 This guide covers Google Pub/Sub-specific features and demonstrates best practices for implementing reliable, scalable message processing systems using Google Pub/Sub with the Expedit library. The examples are based on real working code from the test suite and production examples.
 
+The implementation is built on the Pub/Sub Go SDK v2 (`cloud.google.com/go/pubsub/v2`), which requires Go 1.25. `NewGooglePublisher` and `NewGoogleSubscriber` take a v2 `*pubsub.Client`. Topics and subscriptions are managed with the admin clients of the v2 client (`client.TopicAdminClient`, `client.SubscriptionAdminClient`), see `google/emulator` for an example.
+
 **Google Pub/Sub Specific Features Covered:**
 - Ordering keys for message sequencing
 - Attributes and metadata conversion
@@ -434,7 +436,8 @@ publishMessageWithAttributes(topic, payload, attrs)
 **Key Features**:
 - Custom receive settings for performance tuning
 - Processing timeout configuration
-- Concurrency control: `Receive` maps to `pubsub.Subscription.Receive`, so the number of handlers running at the same time is bounded by `MaxOutstandingMessages` and `NumGoroutines`
+- Concurrency control: `Receive` maps to `pubsub.Subscriber.Receive` (Pub/Sub Go SDK v2), so the number of handlers running at the same time is bounded by `MaxOutstandingMessages` and `MaxOutstandingBytes`. `NumGoroutines` is the number of StreamingPull streams and does not limit concurrency
+- Leave `ShutdownOptions` nil, so `Receive` keeps waiting for the in-flight handlers on shutdown
 - Memory management
 
 **Example Scenario**: High-throughput system requiring optimized message processing
@@ -442,8 +445,7 @@ publishMessageWithAttributes(topic, payload, attrs)
 ```go
 // From subscriber_test.go - Advanced subscriber configuration
 receiveSettings := pubsub.ReceiveSettings{
-    NumGoroutines:          10,              // Concurrent workers
-    MaxOutstandingMessages: 1000,            // Max unacknowledged messages
+    MaxOutstandingMessages: 1000,            // Max messages handled at the same time
     MaxOutstandingBytes:    1024 * 1024,     // Memory limit
 }
 
@@ -453,11 +455,10 @@ subscriber, err := google.NewGoogleSubscriber(setup.Client,
     google.WithProcessingTimeout(30*time.Second),
     google.WithParseAttributes(true))
 
-// Edge case handling - negative values are handled gracefully
+// Negative values disable the flow control limits: the number of messages handled at the same time is unbounded
 edgeCaseSettings := pubsub.ReceiveSettings{
-    NumGoroutines:          -1,    // Invalid, will use defaults
-    MaxOutstandingMessages: -1,    // Invalid, will use defaults  
-    MaxOutstandingBytes:    -1,    // Invalid, will use defaults
+    MaxOutstandingMessages: -1,    // No limit on the number of messages
+    MaxOutstandingBytes:    -1,    // No limit on the size of the messages
 }
 
 subscriber, err := google.NewGoogleSubscriber(setup.Client,
@@ -515,8 +516,8 @@ google.WithOrderingKeyProvider(func(msg *message.Message) string {
 ```go
 // Optimized settings for high-throughput scenarios
 receiveSettings := pubsub.ReceiveSettings{
-    NumGoroutines:          20,               // More concurrent workers
-    MaxOutstandingMessages: 2000,             // Higher message buffer
+    NumGoroutines:          2,                // More StreamingPull streams, for very high throughput
+    MaxOutstandingMessages: 2000,             // More messages handled at the same time
     MaxOutstandingBytes:    10 * 1024 * 1024, // 10MB memory limit
 }
 ```

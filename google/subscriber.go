@@ -1,7 +1,7 @@
 package google
 
 import (
-	"cloud.google.com/go/pubsub"
+	"cloud.google.com/go/pubsub/v2"
 	"context"
 	"errors"
 	"fmt"
@@ -35,8 +35,10 @@ func WithProcessingTimeout(timeout time.Duration) SubscriberOption {
 	}
 }
 
-// WithReceiveSettings is a set of options to pass the underlying gcp pubsub.Subscription. Its
-// MaxOutstandingMessages and NumGoroutines limit how many messages are handled at the same time.
+// WithReceiveSettings is a set of options to pass the underlying gcp pubsub.Subscriber. Its
+// MaxOutstandingMessages and MaxOutstandingBytes limit how many messages are handled at the same time.
+// Leave ShutdownOptions nil to keep the shutdown behavior of Receive (wait for the in-flight handlers): with
+// ShutdownOptions set, the Pub/Sub client may stop waiting for them, and nack them.
 func WithReceiveSettings(settings pubsub.ReceiveSettings) SubscriberOption {
 	return func(opts *SubscriberOptions) {
 		opts.receiveSettings = settings
@@ -87,7 +89,7 @@ func NewGoogleSubscriber(
 // Receive implements subscriber.Subscriber. The Pub/Sub client limits the concurrency, see WithReceiveSettings.
 func (s *Subscriber) Receive(ctx context.Context, handler message.HandlerFunc) error {
 	d := subscriber.NewDispatcher(handler, subscriber.DispatchOptions{ProcessingTimeout: s.options.processingTimeout})
-	sub := s.client.Subscription(s.subscription)
+	sub := s.client.Subscriber(s.subscription)
 	sub.ReceiveSettings = s.options.receiveSettings
 
 	// Receive returns nil when ctx is done, after all the callbacks returned
