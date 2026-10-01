@@ -104,7 +104,6 @@ func asyncCountMessages(count *atomic.Int32, ch <-chan *message.Message, duratio
 	}()
 }
 
-
 func createTestConnectionWithToxiproxy(toxi *simpleToxiproxy) (*amqp.ReconnectingConnection, *amqp.ReconnectingChannel, error) {
 	config := amqpgo.Config{
 		Vhost:      "/",

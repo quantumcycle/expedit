@@ -545,7 +545,6 @@ func CreateHeadersExchange(channel *amqp.ReconnectingChannel, exchangeName strin
 		for k, v := range binding.Headers {
 			bindingArgs[k] = v
 		}
-		
 
 		err = retryOperation(func() error {
 			return channel.QueueBind(queue.Name, "", fullExchangeName, false, bindingArgs)
