@@ -1,6 +1,7 @@
 package testrabbit
 
 import (
+	"context"
 	"fmt"
 	"github.com/lithammer/shortuuid/v3"
 	amqp "github.com/quantumcycle/expedit/amqp"
@@ -71,7 +72,7 @@ func (d DirectQueue) PublishBytes(bytes []byte, attrs map[string]interface{}) {
 }
 
 func (d DirectQueue) Consume() <-chan amqpgo.Delivery {
-	ch, err := d.channel.Consume(d.QueueName, "", false, true, false, false, nil)
+	ch, err := d.channel.Consume(context.Background(), d.QueueName, "", false, true, false, false, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -148,7 +149,7 @@ func (d DirectRoutingExchange) Consume(route string) <-chan amqpgo.Delivery {
 	if !ok {
 		panic(fmt.Errorf("no queue for route %s", route))
 	}
-	ch, err := d.channel.Consume(queueName, "", false, true, false, false, nil)
+	ch, err := d.channel.Consume(context.Background(), queueName, "", false, true, false, false, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -261,7 +262,7 @@ func (d FanoutExchange) Consume(logicalQueueName string) <-chan amqpgo.Delivery 
 	if !ok {
 		panic(fmt.Errorf("no queue for logical name %s", logicalQueueName))
 	}
-	ch, err := d.channel.Consume(actualQueueName, "", false, true, false, false, nil)
+	ch, err := d.channel.Consume(context.Background(), actualQueueName, "", false, true, false, false, nil)
 	if err != nil {
 		panic(err)
 	}
@@ -376,7 +377,7 @@ func (d TopicExchange) Consume(pattern string) <-chan amqpgo.Delivery {
 	if !ok {
 		panic(fmt.Errorf("no queue for pattern %s", pattern))
 	}
-	ch, err := d.channel.Consume(queueName, "", false, true, false, false, nil)
+	ch, err := d.channel.Consume(context.Background(), queueName, "", false, true, false, false, nil)
 	if err != nil {
 		panic(fmt.Errorf("cannot consume queue pattern %s [%s]: %w", pattern, d.ExchangeName, err))
 	}
@@ -490,7 +491,7 @@ func (d HeadersExchange) Consume(bindingKey string) <-chan amqpgo.Delivery {
 	if !ok {
 		panic(fmt.Errorf("no queue for binding key %s", bindingKey))
 	}
-	ch, err := d.channel.Consume(queueName, "", false, true, false, false, nil)
+	ch, err := d.channel.Consume(context.Background(), queueName, "", false, true, false, false, nil)
 	if err != nil {
 		panic(err)
 	}

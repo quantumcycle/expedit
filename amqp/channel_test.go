@@ -21,7 +21,7 @@ func deleteQueueOnNewChannel(g Gomega, conn *amqp.ReconnectingConnection, queueN
 }
 
 func TestReconnectingChannelConsume(t *testing.T) {
-	t.Run("ConsumeWithContext", func(t *testing.T) {
+	t.Run("Consume", func(t *testing.T) {
 		t.Run("should deliver the messages of the queue", func(t *testing.T) {
 			g := NewGomegaWithT(t)
 			conn, channel, err := createTestConnection()
@@ -33,7 +33,7 @@ func TestReconnectingChannelConsume(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			deliveries, err := channel.ConsumeWithContext(ctx, queue.QueueName, "", true, false, false, false, nil)
+			deliveries, err := channel.Consume(ctx, queue.QueueName, "", true, false, false, false, nil)
 			g.Expect(err).NotTo(HaveOccurred())
 			queue.PublishBytes([]byte("hello"), nil)
 
@@ -52,7 +52,7 @@ func TestReconnectingChannelConsume(t *testing.T) {
 			defer queue.Delete()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			deliveries, err := channel.ConsumeWithContext(ctx, queue.QueueName, "", false, false, false, false, nil)
+			deliveries, err := channel.Consume(ctx, queue.QueueName, "", false, false, false, false, nil)
 			g.Expect(err).NotTo(HaveOccurred())
 			cancel()
 
@@ -69,7 +69,7 @@ func TestReconnectingChannelConsume(t *testing.T) {
 			defer queue.Delete()
 			ctx, cancel := context.WithCancel(context.Background())
 
-			deliveries, err := channel.ConsumeWithContext(ctx, queue.QueueName, "", false, false, false, false, nil)
+			deliveries, err := channel.Consume(ctx, queue.QueueName, "", false, false, false, false, nil)
 			g.Expect(err).NotTo(HaveOccurred())
 			cancel()
 			g.Eventually(deliveries, 3*time.Second).Should(BeClosed())
@@ -92,7 +92,7 @@ func TestReconnectingChannelConsume(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			deliveries, err := channel.ConsumeWithContext(ctx, queue.QueueName, "", false, false, false, false, nil)
+			deliveries, err := channel.Consume(ctx, queue.QueueName, "", false, false, false, false, nil)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(channel.Close()).To(Succeed())
 

@@ -3,7 +3,6 @@ package amqp_test
 import (
 	"context"
 	"fmt"
-	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/amqp"
 	"github.com/quantumcycle/expedit/amqp/testrabbit"
+	"github.com/quantumcycle/expedit/core/loadtest"
 	amqpgo "github.com/rabbitmq/amqp091-go"
 )
 
@@ -67,29 +67,6 @@ func createLoadTestConnection() (*amqp.ReconnectingConnection, *amqp.Reconnectin
 	return conn, channel, nil
 }
 
-// snapshot returns a copy of the entry of a map that is written concurrently by the consumers.
-func snapshot(mu *sync.Mutex, m map[string][]string, key string) []string {
-	mu.Lock()
-	defer mu.Unlock()
-	return append([]string(nil), m[key]...)
-}
-
-func findDuplicateMessages(msgs1 []string, msgs2 []string) []string {
-	duplicates := []string{}
-	for _, msg1 := range msgs1 {
-		for _, msg2 := range msgs2 {
-			if msg1 == msg2 {
-				duplicates = append(duplicates, msg1)
-			}
-		}
-	}
-	return duplicates
-}
-
-func randomInt(lower int, higher int) int {
-	return rand.IntN(higher-lower+1) + lower
-}
-
 func setupAMQPLoadTest(t *testing.T) (*amqp.ReconnectingConnection, *amqp.ReconnectingChannel, []testrabbit.DirectQueue) {
 	var err error
 	// Use the improved connection helper
@@ -129,10 +106,8 @@ func TestAMQPLoadTest(t *testing.T) {
 		var totalSentCount int64
 		var totalProcessedCount int64
 		var nackCount int64
-		var consumerMu sync.Mutex
-		var consumerCounts map[string][]string
 
-		consumerCounts = make(map[string][]string)
+		received := loadtest.NewRecorder()
 		nbMessagesToSendPerQueue := 100
 
 		// Track consumer readiness
@@ -170,21 +145,15 @@ func TestAMQPLoadTest(t *testing.T) {
 							}
 
 							// Small error rate for testing robustness
-							if randomInt(1, 1000) <= 5 { // 0.5% failure rate
+							if loadtest.RandomInt(1, 1000) <= 5 { // 0.5% failure rate
 								atomic.AddInt64(&nackCount, 1)
 								msg.Nack()
 								continue
 							}
 
 							atomic.AddInt64(&totalProcessedCount, 1)
-							consumerMu.Lock()
-							if _, exists := consumerCounts[consumerID]; !exists {
-								consumerCounts[consumerID] = []string{}
-							}
 							// Use payload content as identifier since message ID might be empty
-							msgContent := string(msg.Payload.([]byte))
-							consumerCounts[consumerID] = append(consumerCounts[consumerID], msgContent)
-							consumerMu.Unlock()
+							received.Record(consumerID, string(msg.Payload.([]byte)))
 							msg.Ack()
 
 						case <-ctx.Done():
@@ -281,8 +250,8 @@ func TestAMQPLoadTest(t *testing.T) {
 			consumer1ID := fmt.Sprintf("queue-%d-consumer-%d", queueIndex, 1)
 			consumer2ID := fmt.Sprintf("queue-%d-consumer-%d", queueIndex, 2)
 
-			consumer1Msgs := snapshot(&consumerMu, consumerCounts, consumer1ID)
-			consumer2Msgs := snapshot(&consumerMu, consumerCounts, consumer2ID)
+			consumer1Msgs := received.IDs(consumer1ID)
+			consumer2Msgs := received.IDs(consumer2ID)
 
 			totalMsgsForQueue := len(consumer1Msgs) + len(consumer2Msgs)
 			// Allow for variance due to nacked messages and load test timing
@@ -292,7 +261,7 @@ func TestAMQPLoadTest(t *testing.T) {
 				queueIndex, nbMessagesToSendPerQueue, totalMsgsForQueue, len(consumer1Msgs), len(consumer2Msgs))
 
 			// Verify no message duplication between consumers
-			duplicates := findDuplicateMessages(consumer1Msgs, consumer2Msgs)
+			duplicates := loadtest.Duplicates(consumer1Msgs, consumer2Msgs)
 			g.Expect(duplicates).To(BeEmpty(), "Found duplicate messages between consumers for queue %d: %v", queueIndex, duplicates)
 		}
 	})

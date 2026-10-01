@@ -90,13 +90,7 @@ func (ch *ReconnectingChannel) Close() error {
 	return ch.Channel.Close()
 }
 
-// Consume wrap amqp.Channel.Consume, the returned delivery will end only when channel closed by developer.
-// Use ConsumeWithContext to be able to stop consuming without closing the channel.
-func (ch *ReconnectingChannel) Consume(queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error) {
-	return ch.ConsumeWithContext(context.Background(), queue, consumer, autoAck, exclusive, noLocal, noWait, args)
-}
-
-// ConsumeWithContext wrap amqp.Channel.ConsumeWithContext and keeps consuming after a reconnection. The returned
+// Consume wrap amqp.Channel.ConsumeWithContext and keeps consuming after a reconnection. The returned
 // deliveries channel is closed, and the consumer is cancelled, when ctx is done or when the channel is closed by the
 // developer. It is also closed when the broker cancels the consumer while the channel stays open, for example
 // because the queue was deleted.
@@ -104,7 +98,7 @@ func (ch *ReconnectingChannel) Consume(queue, consumer string, autoAck, exclusiv
 // The first consume is done synchronously, so its error is returned and no RPC of this consumer runs concurrently
 // with the next calls on the channel. amqp091 matches RPC responses in order, so concurrent RPCs on the same channel
 // can receive each other's responses.
-func (ch *ReconnectingChannel) ConsumeWithContext(ctx context.Context, queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error) {
+func (ch *ReconnectingChannel) Consume(ctx context.Context, queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error) {
 	consumingOn := ch.Channel
 	d, err := consumingOn.ConsumeWithContext(ctx, queue, consumer, autoAck, exclusive, noLocal, noWait, args)
 	if err != nil {

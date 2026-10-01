@@ -98,7 +98,7 @@ func NewAMQPSubscriber(channel *ReconnectingChannel, queue string, opts ...Subsc
 
 	internalSubscriber := subscriber.MessageSubscriber[*amqp.Delivery]{
 		InitializeFn: func(ctx context.Context, outputCh chan *message.Message, done func(err error)) error {
-			msgsCh, err := channel.ConsumeWithContext(ctx, queue, "",
+			msgsCh, err := channel.Consume(ctx, queue, "",
 				options.autoAck,
 				options.exclusive,
 				false,
