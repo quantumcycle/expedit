@@ -30,10 +30,14 @@ package amqp
 import (
 	"context"
 	"errors"
+	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"sync/atomic"
 	"time"
 )
+
+// ErrQueueNotFound is returned when consuming from a queue that does not exist.
+var ErrQueueNotFound = errors.New("queue does not exist")
 
 type ReconnectingChannel struct {
 	*amqp.Channel
@@ -94,59 +98,61 @@ func (ch *ReconnectingChannel) Consume(queue, consumer string, autoAck, exclusiv
 
 // ConsumeWithContext wrap amqp.Channel.ConsumeWithContext and keeps consuming after a reconnection. The returned
 // deliveries channel is closed, and the consumer is cancelled, when ctx is done or when the channel is closed by the
-// developer.
+// developer. It is also closed when the broker cancels the consumer while the channel stays open, for example
+// because the queue was deleted.
+//
+// The first consume is done synchronously, so its error is returned and no RPC of this consumer runs concurrently
+// with the next calls on the channel. amqp091 matches RPC responses in order, so concurrent RPCs on the same channel
+// can receive each other's responses.
 func (ch *ReconnectingChannel) ConsumeWithContext(ctx context.Context, queue, consumer string, autoAck, exclusive, noLocal, noWait bool, args amqp.Table) (<-chan amqp.Delivery, error) {
-	deliveries := make(chan amqp.Delivery)
-
-	// Check queue existence with limited retry for timing issues during test setup
-	// Only retry for a short period to handle race conditions in tests
-	maxRetries := 3
-	for i := 0; i < maxRetries; i++ {
-		_, err := ch.Channel.QueueDeclarePassive(queue, false, false, false, false, nil)
-		if err == nil {
-			break // Queue exists, continue
+	consumingOn := ch.Channel
+	d, err := consumingOn.ConsumeWithContext(ctx, queue, consumer, autoAck, exclusive, noLocal, noWait, args)
+	if err != nil {
+		var amqpErr *amqp.Error
+		if errors.As(err, &amqpErr) && amqpErr.Code == amqp.NotFound {
+			return nil, fmt.Errorf("%w: %s", ErrQueueNotFound, queue)
 		}
-		if i == maxRetries-1 {
-			// Return original error message for compatibility
-			return nil, errors.New("queue does not exist")
-		}
-		// Brief wait only for potential timing issues
-		time.Sleep(50 * time.Millisecond)
+		return nil, err
 	}
 
+	deliveries := make(chan amqp.Delivery)
 	go func() {
 		defer close(deliveries)
 		var reconnectionAttempts int
 		for {
-			// Do not talk to a channel that was closed in the meantime, the broker would drop the connection
-			if ctx.Err() != nil || ch.IsClosed() {
-				return
-			}
-			d, err := ch.Channel.ConsumeWithContext(ctx, queue, consumer, autoAck, exclusive, noLocal, noWait, args)
-			if err == nil {
-				reconnectionAttempts = 0
-				for msg := range d {
-					select {
-					case deliveries <- msg:
-					case <-ctx.Done():
-						return
-					}
+			for msg := range d {
+				select {
+				case deliveries <- msg:
+				case <-ctx.Done():
+					return
 				}
 			}
 
-			// The deliveries ended or the consumer could not be started. The closed flag is set before the
-			// channel is closed, so it is reliable here.
-			if ctx.Err() != nil || ch.IsClosed() {
+			// The broker cancelled the consumer, there is nothing to reconnect
+			if !consumingOn.IsClosed() {
 				return
 			}
 
-			// Wait for the reconnection before trying to consume again
-			select {
-			case <-time.After(ch.connection.opts.retryStrategy(reconnectionAttempts)):
-			case <-ctx.Done():
-				return
+			// The channel was lost, consume again once reconnected, until it succeeds
+			for {
+				// The closed flag is set before the channel is closed, so it is reliable here. Do not talk to a
+				// channel that was closed in the meantime, the broker would drop the connection.
+				if ctx.Err() != nil || ch.IsClosed() {
+					return
+				}
+				select {
+				case <-time.After(ch.connection.opts.retryStrategy(reconnectionAttempts)):
+				case <-ctx.Done():
+					return
+				}
+				reconnectionAttempts++
+				consumingOn = ch.Channel
+				d, err = consumingOn.ConsumeWithContext(ctx, queue, consumer, autoAck, exclusive, noLocal, noWait, args)
+				if err == nil {
+					reconnectionAttempts = 0
+					break
+				}
 			}
-			reconnectionAttempts++
 		}
 	}()
 

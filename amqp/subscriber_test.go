@@ -181,7 +181,7 @@ func TestAMQPSubscriber(t *testing.T) {
 
 		_, err = subscriber.Subscribe(ctx)
 		g.Expect(err).To(HaveOccurred())
-		g.Expect(err).To(MatchError("queue does not exist"))
+		g.Expect(err).To(MatchError(amqp.ErrQueueNotFound))
 	})
 
 	t.Run("when using a direct queue", func(t *testing.T) {
