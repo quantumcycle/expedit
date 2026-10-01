@@ -58,8 +58,9 @@ func TestGooglePubsubLoadTest(t *testing.T) {
 							continue
 						}
 
-						atomic.AddInt64(&totalProcessedCount, 1)
+						// Record before counting, so the records are complete once the count is reached
 						received.Record(consumerID, msg.ID)
+						atomic.AddInt64(&totalProcessedCount, 1)
 						msg.Ack()
 					}
 				}(j+1, subName)
