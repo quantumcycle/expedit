@@ -4,6 +4,8 @@ import (
 	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -55,7 +57,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		g.Expect(err).NotTo(HaveOccurred())
 		defer subscriber.Close()
 
-		msgCount := 0
+		var msgCount atomic.Int32
 		AsyncCountMessages(&msgCount, msgCh, 5*time.Second)
 
 		expectedMsgCount := 10
@@ -63,7 +65,7 @@ func TestGoogleSubscriber(t *testing.T) {
 			setup.Topic.PublishBytes(ctx, []byte("payload"), nil)
 		}
 		g.Eventually(func() int {
-			return msgCount
+			return int(msgCount.Load())
 		}, 3*time.Second).Should(Equal(expectedMsgCount))
 	})
 
@@ -84,7 +86,7 @@ func TestGoogleSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
-			var att1Val interface{}
+			var att1Val atomic.Value
 			go func() {
 				for {
 					select {
@@ -94,7 +96,9 @@ func TestGoogleSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						att1Val = msg.Metadata["att1"]
+						if v := msg.Metadata["att1"]; v != nil {
+							att1Val.Store(v)
+						}
 					}
 				}
 			}()
@@ -104,10 +108,10 @@ func TestGoogleSubscriber(t *testing.T) {
 			setup.Topic.PublishBytes(ctx, []byte("payload"), attrs)
 
 			g.Eventually(func() interface{} {
-				return att1Val
+				return att1Val.Load()
 			}).Should(Not(BeNil()))
 
-			g.Expect(att1Val).To(Equal(true))
+			g.Expect(att1Val.Load()).To(Equal(true))
 		})
 
 		t.Run("should convert float", func(t *testing.T) {
@@ -126,7 +130,7 @@ func TestGoogleSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
-			var att1Val interface{}
+			var att1Val atomic.Value
 			go func() {
 				for {
 					select {
@@ -136,7 +140,9 @@ func TestGoogleSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						att1Val = msg.Metadata["att1"]
+						if v := msg.Metadata["att1"]; v != nil {
+							att1Val.Store(v)
+						}
 					}
 				}
 			}()
@@ -146,10 +152,10 @@ func TestGoogleSubscriber(t *testing.T) {
 			setup.Topic.PublishBytes(ctx, []byte("payload"), attrs)
 
 			g.Eventually(func() interface{} {
-				return att1Val
+				return att1Val.Load()
 			}).Should(Not(BeNil()))
 
-			g.Expect(att1Val).To(Equal(10.231))
+			g.Expect(att1Val.Load()).To(Equal(10.231))
 		})
 
 		t.Run("should convert integer", func(t *testing.T) {
@@ -168,7 +174,7 @@ func TestGoogleSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
-			var att1Val interface{}
+			var att1Val atomic.Value
 			go func() {
 				for {
 					select {
@@ -178,7 +184,9 @@ func TestGoogleSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						att1Val = msg.Metadata["att1"]
+						if v := msg.Metadata["att1"]; v != nil {
+							att1Val.Store(v)
+						}
 					}
 				}
 			}()
@@ -188,10 +196,10 @@ func TestGoogleSubscriber(t *testing.T) {
 			setup.Topic.PublishBytes(ctx, []byte("payload"), attrs)
 
 			g.Eventually(func() interface{} {
-				return att1Val
+				return att1Val.Load()
 			}).Should(Not(BeNil()))
 
-			g.Expect(att1Val).To(Equal(int64(10)))
+			g.Expect(att1Val.Load()).To(Equal(int64(10)))
 		})
 
 		t.Run("should keep string as is", func(t *testing.T) {
@@ -210,7 +218,7 @@ func TestGoogleSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer subscriber.Close()
 
-			var att1Val interface{}
+			var att1Val atomic.Value
 			go func() {
 				for {
 					select {
@@ -220,7 +228,9 @@ func TestGoogleSubscriber(t *testing.T) {
 						if msg == nil {
 							return
 						}
-						att1Val = msg.Metadata["att1"]
+						if v := msg.Metadata["att1"]; v != nil {
+							att1Val.Store(v)
+						}
 					}
 				}
 			}()
@@ -230,10 +240,10 @@ func TestGoogleSubscriber(t *testing.T) {
 			setup.Topic.PublishBytes(ctx, []byte("payload"), attrs)
 
 			g.Eventually(func() interface{} {
-				return att1Val
+				return att1Val.Load()
 			}).Should(Not(BeNil()))
 
-			g.Expect(att1Val).To(Equal("hello"))
+			g.Expect(att1Val.Load()).To(Equal("hello"))
 		})
 	})
 
@@ -245,16 +255,16 @@ func TestGoogleSubscriber(t *testing.T) {
 		subscriptionName := UniqueSubscriptionName("test-subscription")
 		subscription := setup.Topic.CreateTestSubscription(ctx, subscriptionName, false)
 
-		timeoutOccurred := false
+		var timeoutOccurred atomic.Bool
 		subscriber, err := google.NewGoogleSubscriber(setup.Client,
 			subscription.Name,
 			google.WithProcessingTimeout(1*time.Second),
 			google.WithProcessingTimeoutHandler(func(ctx context.Context, msg *pubsub.Message) {
-				timeoutOccurred = true
+				timeoutOccurred.Store(true)
 			}))
 		g.Expect(err).NotTo(HaveOccurred())
 
-		nackOccurred := false
+		var nackOccurred atomic.Bool
 		msgCh, err := subscriber.Subscribe(ctx)
 		defer subscriber.Close()
 		g.Expect(err).NotTo(HaveOccurred())
@@ -269,7 +279,7 @@ func TestGoogleSubscriber(t *testing.T) {
 					}
 					nextState := <-msg.StateChange()
 					if nextState == message.Nack {
-						nackOccurred = true
+						nackOccurred.Store(true)
 					}
 				}
 			}
@@ -278,7 +288,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		setup.Topic.PublishBytes(ctx, []byte("payload"), nil)
 
 		g.Eventually(func() bool {
-			return timeoutOccurred && nackOccurred
+			return timeoutOccurred.Load() && nackOccurred.Load()
 		}, 5*time.Second).Should(Equal(true))
 	})
 
@@ -297,6 +307,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		defer subscriber.Close()
 		g.Expect(err).NotTo(HaveOccurred())
 
+		var idMu sync.Mutex
 		idReceived := make(map[string]bool)
 		go func() {
 			for {
@@ -307,7 +318,9 @@ func TestGoogleSubscriber(t *testing.T) {
 					if msg == nil {
 						return
 					}
+					idMu.Lock()
 					idReceived[msg.ID] = true
+					idMu.Unlock()
 				}
 			}
 		}()
@@ -319,6 +332,8 @@ func TestGoogleSubscriber(t *testing.T) {
 		}
 
 		g.Eventually(func() []string {
+			idMu.Lock()
+			defer idMu.Unlock()
 			keys := make([]string, 0, len(idReceived))
 			for k := range idReceived {
 				keys = append(keys, k)
@@ -339,8 +354,8 @@ func TestGoogleSubscriber(t *testing.T) {
 		defer subscriber.Close()
 		g.Expect(err).NotTo(HaveOccurred())
 
-		nackDone := false
-		processCount := 0
+		var nackDone atomic.Bool
+		var processCount atomic.Int32
 		msgCh, err := subscriber.Subscribe(ctx)
 		g.Expect(err).NotTo(HaveOccurred())
 		go func() {
@@ -352,9 +367,9 @@ func TestGoogleSubscriber(t *testing.T) {
 					if msg == nil {
 						return
 					}
-					processCount++
-					if !nackDone {
-						nackDone = true
+					processCount.Add(1)
+					if !nackDone.Load() {
+						nackDone.Store(true)
 						msg.Nack()
 					} else {
 						msg.Ack()
@@ -369,7 +384,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		}
 
 		g.Eventually(func() int {
-			return processCount
+			return int(processCount.Load())
 		}, 5*time.Second).Should(Equal(nbMsg + 1))
 	})
 
@@ -390,7 +405,7 @@ func TestGoogleSubscriber(t *testing.T) {
 
 		setup.Topic.PublishBytes(ctx, []byte("payload"), nil)
 
-		processCount := 0
+		var processCount atomic.Int32
 		waitCh := make(chan bool)
 		go func() {
 			for {
@@ -403,7 +418,7 @@ func TestGoogleSubscriber(t *testing.T) {
 					}
 					msgCtxDone := msg.Context().Done()
 					msg.Ack()
-					processCount++
+					processCount.Add(1)
 					g.Eventually(msgCtxDone, 3*time.Second).Should(BeClosed())
 					waitCh <- true
 				}
@@ -411,7 +426,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		}()
 		<-waitCh
 
-		g.Expect(processCount).To(Equal(1))
+		g.Expect(int(processCount.Load())).To(Equal(1))
 	})
 
 	t.Run("should propagate context cancellation properly", func(t *testing.T) {
@@ -485,7 +500,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		g.Expect(err).NotTo(HaveOccurred())
 		defer subscriber.Close()
 
-		processedCount := 0
+		var processedCount atomic.Int32
 		go func() {
 			for {
 				select {
@@ -495,7 +510,7 @@ func TestGoogleSubscriber(t *testing.T) {
 					if msg == nil {
 						return
 					}
-					processedCount++
+					processedCount.Add(1)
 					msg.Ack()
 				}
 			}
@@ -506,7 +521,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		}
 
 		g.Eventually(func() int {
-			return processedCount
+			return int(processedCount.Load())
 		}, 5*time.Second).Should(Equal(20))
 	})
 
@@ -518,12 +533,12 @@ func TestGoogleSubscriber(t *testing.T) {
 		subscriptionName := UniqueSubscriptionName("test-subscription")
 		subscription := setup.Topic.CreateTestSubscription(ctx, subscriptionName, false)
 
-		timeoutHandlerCalled := false
+		var timeoutHandlerCalled atomic.Bool
 		subscriber, err := google.NewGoogleSubscriber(setup.Client,
 			subscription.Name,
 			google.WithProcessingTimeout(300*time.Second),
 			google.WithProcessingTimeoutHandler(func(ctx context.Context, msg *pubsub.Message) {
-				timeoutHandlerCalled = true
+				timeoutHandlerCalled.Store(true)
 			}))
 		g.Expect(err).NotTo(HaveOccurred())
 
@@ -531,7 +546,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		g.Expect(err).NotTo(HaveOccurred())
 		defer subscriber.Close()
 
-		processedCount := 0
+		var processedCount atomic.Int32
 		go func() {
 			for {
 				select {
@@ -541,7 +556,7 @@ func TestGoogleSubscriber(t *testing.T) {
 					if msg == nil {
 						return
 					}
-					processedCount++
+					processedCount.Add(1)
 					msg.Ack()
 				}
 			}
@@ -550,9 +565,9 @@ func TestGoogleSubscriber(t *testing.T) {
 		setup.Topic.PublishBytes(ctx, []byte("payload"), nil)
 
 		g.Eventually(func() int {
-			return processedCount
+			return int(processedCount.Load())
 		}, 3*time.Second).Should(Equal(1))
-		g.Expect(timeoutHandlerCalled).To(BeFalse())
+		g.Expect(timeoutHandlerCalled.Load()).To(BeFalse())
 	})
 
 	t.Run("should accept subscriber options with various edge case values", func(t *testing.T) {
@@ -581,7 +596,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		g.Expect(err).NotTo(HaveOccurred())
 		defer subscriber.Close()
 
-		processedCount := 0
+		var processedCount atomic.Int32
 		go func() {
 			for {
 				select {
@@ -591,7 +606,7 @@ func TestGoogleSubscriber(t *testing.T) {
 					if msg == nil {
 						return
 					}
-					processedCount++
+					processedCount.Add(1)
 					msg.Ack()
 				}
 			}
@@ -600,7 +615,7 @@ func TestGoogleSubscriber(t *testing.T) {
 		setup.Topic.PublishBytes(ctx, []byte("payload"), nil)
 
 		g.Eventually(func() int {
-			return processedCount
+			return int(processedCount.Load())
 		}, 3*time.Second).Should(Equal(1))
 	})
 
@@ -623,7 +638,7 @@ func TestGoogleSubscriber(t *testing.T) {
 			defer subscriber.Close()
 
 			iterations := 1000
-			processedCount := 0
+			var processedCount atomic.Int32
 			transformationTimes := make([]time.Duration, 0, iterations)
 
 			go func() {
@@ -646,7 +661,7 @@ func TestGoogleSubscriber(t *testing.T) {
 						transformationTime := time.Since(start)
 						transformationTimes = append(transformationTimes, transformationTime)
 
-						processedCount++
+						processedCount.Add(1)
 						msg.Ack()
 					}
 				}
@@ -664,7 +679,7 @@ func TestGoogleSubscriber(t *testing.T) {
 			publishDuration := time.Since(publishStart)
 
 			g.Eventually(func() int {
-				return processedCount
+				return int(processedCount.Load())
 			}, 20*time.Second).Should(Equal(iterations))
 
 			var totalTransformTime time.Duration
@@ -673,7 +688,7 @@ func TestGoogleSubscriber(t *testing.T) {
 			}
 			avgTransformTime := totalTransformTime / time.Duration(len(transformationTimes))
 
-			t.Logf("Message transformation benchmark: %d messages processed", processedCount)
+			t.Logf("Message transformation benchmark: %d messages processed", processedCount.Load())
 			t.Logf("Publishing took: %v (avg: %v per message)",
 				publishDuration, publishDuration/time.Duration(iterations))
 			t.Logf("Avg transformation time: %v per message", avgTransformTime)

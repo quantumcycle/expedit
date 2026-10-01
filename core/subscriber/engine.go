@@ -28,6 +28,8 @@ func NewSubscriptionEngine(sub Subscriber, router SubscriptionRouter) *Subscript
 }
 
 func (p *SubscriptionEngine) AddMiddleware(m middleware.Middleware) *SubscriptionEngine {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 	if p.handlerFn != nil {
 		panic("cannot add middleware after subscription has started")
 	}
@@ -35,16 +37,19 @@ func (p *SubscriptionEngine) AddMiddleware(m middleware.Middleware) *Subscriptio
 	return p
 }
 
+// Start subscribes and handles messages until the message channel of the subscriber is closed. It returns the
+// terminal error reported by the subscriber (see Subscriber.Err), or nil if the subscription ended without error,
+// for example because ctx was cancelled.
 func (e *SubscriptionEngine) Start(ctx context.Context) error {
-	if e.handlerFn == nil {
-		e.lock.Lock()
-		defer e.lock.Unlock()
-		if e.handlerFn == nil {
-			e.handlerFn = e.mc.Wrap(e.router.HandlerFunc())
-		}
-	} else {
+	e.lock.Lock()
+	if e.handlerFn != nil {
+		e.lock.Unlock()
 		panic("cannot start subscription engine twice")
 	}
+	handlerFn := e.mc.Wrap(e.router.HandlerFunc())
+	e.handlerFn = handlerFn
+	e.lock.Unlock()
+
 	msgChannel, err := e.sub.Subscribe(ctx)
 	if err != nil {
 		return err
@@ -53,10 +58,10 @@ func (e *SubscriptionEngine) Start(ctx context.Context) error {
 		//Avoid golang loop variable issue
 		loopMsg := msg
 		go func() {
-			handleMessage(loopMsg, e.handlerFn)
+			handleMessage(loopMsg, handlerFn)
 		}()
 	}
-	return nil
+	return e.sub.Err()
 }
 
 func handleMessage(

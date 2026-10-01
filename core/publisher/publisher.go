@@ -70,14 +70,11 @@ type MessagePublisher[T any] struct {
 }
 
 func (p *MessagePublisher[T]) Publish(message *message.Message) error {
-	if p.closed {
-		return ErrClosed
-	}
 	destName, err := p.RoutingFunc(message)
 	if err != nil {
 		return err
 	}
-	pub, err := p.GetDestinationPublisher(destName)
+	pub, err := p.getPublisher(destName)
 	if err != nil {
 		return err
 	}
@@ -98,41 +95,56 @@ func (p *MessagePublisher[T]) Publish(message *message.Message) error {
 	return nil
 }
 
-func (p *MessagePublisher[T]) getPublisher(dest Destination) (pub MessagesPublisherImpl[T], err error) {
+// getPublisher returns the cached publisher of a destination, creating it on first use.
+func (p *MessagePublisher[T]) getPublisher(dest Destination) (MessagesPublisherImpl[T], error) {
 	p.lock.RLock()
-	t, ok := p.publishers[dest]
+	closed := p.closed
+	pub, ok := p.publishers[dest]
 	p.lock.RUnlock()
+	if closed {
+		return nil, ErrClosed
+	}
 	if ok {
-		return t, nil
+		return pub, nil
 	}
 
 	p.lock.Lock()
-	defer func() {
-		if err == nil {
-			p.publishers[dest] = t
-		}
-		p.lock.Unlock()
-	}()
+	defer p.lock.Unlock()
+	// Re-check, since the state may have changed between releasing the read lock and taking the write lock
+	if p.closed {
+		return nil, ErrClosed
+	}
+	if pub, ok := p.publishers[dest]; ok {
+		return pub, nil
+	}
 
-	pub, err = p.GetDestinationPublisher(dest)
+	pub, err := p.GetDestinationPublisher(dest)
 	if err != nil {
 		return nil, err
 	}
+	if p.publishers == nil {
+		p.publishers = make(map[Destination]MessagesPublisherImpl[T])
+	}
+	p.publishers[dest] = pub
 	return pub, nil
 }
 
+// Close closes every destination publisher. All of them are closed even if some fail, and the errors are returned
+// joined together.
 func (p *MessagePublisher[T]) Close() error {
+	p.lock.Lock()
+	defer p.lock.Unlock()
 	if p.closed {
 		return nil
 	}
-	p.lock.Lock()
-	defer p.lock.Unlock()
-	for _, t := range p.publishers {
-		err := t.Close()
-		if err != nil {
-			return err
+	p.closed = true
+
+	var errs []error
+	for _, pub := range p.publishers {
+		if err := pub.Close(); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	p.closed = true
-	return nil
+	p.publishers = nil
+	return errors.Join(errs...)
 }

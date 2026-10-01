@@ -18,6 +18,13 @@ import (
 
 // Using shared utility for finding missing messages
 
+// snapshot returns a copy of the entry of a map that is written concurrently.
+func snapshot(mu *sync.Mutex, m map[string][]string, key string) []string {
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]string(nil), m[key]...)
+}
+
 func randomInt(lower int, higher int) int {
 	rand.Seed(uint64(time.Now().UnixNano()))
 	return rand.Intn(higher-lower+1) + lower
@@ -94,7 +101,7 @@ func TestGooglePubsubLoadTest(t *testing.T) {
 				for j := 0; j < nbMessagesToSendPerTopic; j++ {
 					payload := fmt.Sprintf("message %d", j+1)
 					msg := message.NewMessage(context.Background(), []byte(payload))
-					err = pubEngine.Publish(msg)
+					err := pubEngine.Publish(msg)
 					g.Expect(err).NotTo(HaveOccurred())
 					atomic.AddInt64(&totalSentCount, 1)
 					publisherMu.Lock()
@@ -113,26 +120,26 @@ func TestGooglePubsubLoadTest(t *testing.T) {
 		}, "30s").Should(BeNumerically("==", nbMessagesToSendPerTopic*9))
 
 		//Should be at least one random nack
-		g.Expect(nackCount).To(BeNumerically(">", 0))
+		g.Expect(atomic.LoadInt64(&nackCount)).To(BeNumerically(">", 0))
 
 		//each subscription has 2 consumers, so total for both should be nbMessagesToSendPerTopic
 		for subName, _ := range subs {
 			consumer1ID := fmt.Sprintf("%s-consumer-%d", subName, 1)
-			consumer1Msgs := consumerCounts[consumer1ID]
+			consumer1Msgs := snapshot(&consumerMu, consumerCounts, consumer1ID)
 
 			consumer2ID := fmt.Sprintf("%s-consumer-%d", subName, 2)
-			consumer2Msgs := consumerCounts[consumer2ID]
+			consumer2Msgs := snapshot(&consumerMu, consumerCounts, consumer2ID)
 
 			receivedMsgs := append(consumer1Msgs, consumer2Msgs...)
 			g.Expect(len(receivedMsgs)).To(Equal(nbMessagesToSendPerTopic))
 
 			var sentMsgs []string
 			if strings.Contains(subName, "-1-subscription-") {
-				sentMsgs = publisherCounts[string(topics[0].Name)]
+				sentMsgs = snapshot(&publisherMu, publisherCounts, string(topics[0].Name))
 			} else if strings.Contains(subName, "-2-subscription-") {
-				sentMsgs = publisherCounts[string(topics[1].Name)]
+				sentMsgs = snapshot(&publisherMu, publisherCounts, string(topics[1].Name))
 			} else {
-				sentMsgs = publisherCounts[string(topics[2].Name)]
+				sentMsgs = snapshot(&publisherMu, publisherCounts, string(topics[2].Name))
 			}
 
 			delta := FindMissingMessages(sentMsgs, receivedMsgs)

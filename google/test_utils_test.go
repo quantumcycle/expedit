@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/lithammer/shortuuid/v3"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -68,7 +69,7 @@ func ExpectMessageCount[T any](g Gomega, ch <-chan T, expectedCount int, timeout
 }
 
 // AsyncCountMessages counts messages in a channel for a specified duration
-func AsyncCountMessages(count *int, ch <-chan *message.Message, duration time.Duration) {
+func AsyncCountMessages(count *atomic.Int32, ch <-chan *message.Message, duration time.Duration) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), duration)
 		defer cancel()
@@ -77,7 +78,7 @@ func AsyncCountMessages(count *int, ch <-chan *message.Message, duration time.Du
 			case <-ctx.Done():
 				return
 			case <-ch:
-				*count++
+				count.Add(1)
 			}
 		}
 	}()

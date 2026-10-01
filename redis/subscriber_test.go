@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func asyncCountMessages(count *int, ch <-chan *message.Message, duration time.Duration) {
+func asyncCountMessages(count *atomic.Int32, ch <-chan *message.Message, duration time.Duration) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), duration)
 		defer cancel()
@@ -24,7 +25,7 @@ func asyncCountMessages(count *int, ch <-chan *message.Message, duration time.Du
 			case msg, ok := <-ch:
 				if ok {
 					fmt.Printf("Received message %v\n", msg.Payload)
-					*count++
+					count.Add(1)
 				}
 			}
 		}
@@ -117,17 +118,17 @@ func TestRedisSubscriber(t *testing.T) {
 				})
 			}
 
-			msg1Count := 0
+			var msg1Count atomic.Int32
 			asyncCountMessages(&msg1Count, msgCh1, 3*time.Second)
-			msg2Count := 0
+			var msg2Count atomic.Int32
 			asyncCountMessages(&msg2Count, msgCh2, 3*time.Second)
 
 			g.Eventually(func() int {
-				return msg1Count + msg2Count
+				return int(msg1Count.Load() + msg2Count.Load())
 			}, 3*time.Second).Should(Equal(expectedMsgCount))
 
-			g.Expect(msg1Count).To(BeNumerically(">", 0))
-			g.Expect(msg2Count).To(BeNumerically(">", 0))
+			g.Expect(int(msg1Count.Load())).To(BeNumerically(">", 0))
+			g.Expect(int(msg2Count.Load())).To(BeNumerically(">", 0))
 		})
 
 		t.Run("should handle message nack and recovery between consumers", func(t *testing.T) {
@@ -157,8 +158,8 @@ func TestRedisSubscriber(t *testing.T) {
 				},
 			})
 
-			nackedMessageID := ""
-			consumer1ProcessCount := 0
+			var nackedMessageID atomic.Value
+			var consumer1ProcessCount atomic.Int32
 
 			// nackingConsumer receives and nacks the message
 			go func() {
@@ -170,16 +171,16 @@ func TestRedisSubscriber(t *testing.T) {
 						if !ok {
 							return
 						}
-						consumer1ProcessCount++
-						fmt.Printf("Nacking consumer processing message %d: %v (ID: %s)\n", consumer1ProcessCount, msg.Payload, msg.ID)
-						nackedMessageID = msg.ID
+						consumer1ProcessCount.Add(1)
+						fmt.Printf("Nacking consumer processing message %d: %v (ID: %s)\n", consumer1ProcessCount.Load(), msg.Payload, msg.ID)
+						nackedMessageID.Store(msg.ID)
 						msg.Nack() // Always nack to leave it pending
 					}
 				}
 			}()
 
 			// Wait for consumer 1 to nack the message
-			g.Eventually(func() int { return consumer1ProcessCount }, 5*time.Second).Should(Equal(1))
+			g.Eventually(func() int { return int(consumer1ProcessCount.Load()) }, 5*time.Second).Should(Equal(1))
 
 			// Close consumer 1
 			nackingConsumer.Close()
@@ -197,7 +198,7 @@ func TestRedisSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer consumer2.Close()
 
-			consumer2ProcessCount := 0
+			var consumer2ProcessCount atomic.Int32
 
 			// Consumer 2 should claim and ack the pending message
 			go func() {
@@ -209,17 +210,17 @@ func TestRedisSubscriber(t *testing.T) {
 						if !ok {
 							return
 						}
-						consumer2ProcessCount++
-						fmt.Printf("Consumer 2 claimed message %d: %v (ID: %s)\n", consumer2ProcessCount, msg.Payload, msg.ID)
+						consumer2ProcessCount.Add(1)
+						fmt.Printf("Consumer 2 claimed message %d: %v (ID: %s)\n", consumer2ProcessCount.Load(), msg.Payload, msg.ID)
 						msg.Ack()
 					}
 				}
 			}()
 
 			// Consumer 2 should claim and process the pending message
-			g.Eventually(func() int { return consumer2ProcessCount }, 8*time.Second).Should(Equal(1))
+			g.Eventually(func() int { return int(consumer2ProcessCount.Load()) }, 8*time.Second).Should(Equal(1))
 
-			g.Expect(nackedMessageID).NotTo(BeEmpty())
+			g.Expect(nackedMessageID.Load()).NotTo(BeEmpty())
 		})
 
 		t.Run("should claim pending messages from failed consumers", func(t *testing.T) {
@@ -252,7 +253,7 @@ func TestRedisSubscriber(t *testing.T) {
 			}
 
 			// Let the failing consumer receive messages but not ack them
-			failingMsgCount := 0
+			var failingMsgCount atomic.Int32
 			go func() {
 				for {
 					select {
@@ -260,7 +261,7 @@ func TestRedisSubscriber(t *testing.T) {
 						return
 					case msg, ok := <-failingMsgCh:
 						if ok {
-							failingMsgCount++
+							failingMsgCount.Add(1)
 							fmt.Printf("Failing consumer received message: %v (not acking)\n", msg.Payload)
 							// Don't ack - simulate consumer failure
 						}
@@ -269,7 +270,7 @@ func TestRedisSubscriber(t *testing.T) {
 			}()
 
 			// Wait for failing consumer to receive messages
-			g.Eventually(func() int { return failingMsgCount }, 5*time.Second).Should(Equal(3))
+			g.Eventually(func() int { return int(failingMsgCount.Load()) }, 5*time.Second).Should(Equal(3))
 
 			// Close the failing consumer to simulate crash
 			failingSubscriber.Close()
@@ -287,7 +288,7 @@ func TestRedisSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer recoverySubscriber.Close()
 
-			recoveryMsgCount := 0
+			var recoveryMsgCount atomic.Int32
 			go func() {
 				for {
 					select {
@@ -295,7 +296,7 @@ func TestRedisSubscriber(t *testing.T) {
 						return
 					case msg, ok := <-recoveryMsgCh:
 						if ok {
-							recoveryMsgCount++
+							recoveryMsgCount.Add(1)
 							fmt.Printf("Recovery consumer claimed message: %v\n", msg.Payload)
 							msg.Ack()
 						}
@@ -304,7 +305,7 @@ func TestRedisSubscriber(t *testing.T) {
 			}()
 
 			// Recovery consumer should claim and process the pending messages
-			g.Eventually(func() int { return recoveryMsgCount }, 8*time.Second).Should(Equal(3))
+			g.Eventually(func() int { return int(recoveryMsgCount.Load()) }, 8*time.Second).Should(Equal(3))
 		})
 	})
 
@@ -335,11 +336,11 @@ func TestRedisSubscriber(t *testing.T) {
 				})
 			}
 
-			msgCount := 0
+			var msgCount atomic.Int32
 			asyncCountMessages(&msgCount, msgCh, 3*time.Second)
 
 			g.Eventually(func() int {
-				return msgCount
+				return int(msgCount.Load())
 			}, 3*time.Second).Should(Equal(expectedMsgCount))
 		})
 
@@ -366,7 +367,7 @@ func TestRedisSubscriber(t *testing.T) {
 				},
 			})
 
-			processCount := 0
+			var processCount atomic.Int32
 			waitCh := make(chan bool)
 			go func() {
 				for {
@@ -380,13 +381,13 @@ func TestRedisSubscriber(t *testing.T) {
 						msgCtxDone := msg.Context().Done()
 						msg.Ack()
 						g.Eventually(msgCtxDone, 3*time.Second).Should(BeClosed())
-						processCount++
+						processCount.Add(1)
 						waitCh <- true
 					}
 				}
 			}()
 
-			g.Eventually(func() int { return processCount }, 3*time.Second).Should(Equal(1))
+			g.Eventually(func() int { return int(processCount.Load()) }, 3*time.Second).Should(Equal(1))
 		})
 	})
 
@@ -398,9 +399,9 @@ func TestRedisSubscriber(t *testing.T) {
 			defer cancel()
 			stream := newStreamName()
 
-			timeoutCalled := false
+			var timeoutCalled atomic.Bool
 			timeoutHandler := func(ctx context.Context, msg subredis.MessageWrapper) {
-				timeoutCalled = true
+				timeoutCalled.Store(true)
 			}
 
 			// Add a message first to create the stream
@@ -432,7 +433,7 @@ func TestRedisSubscriber(t *testing.T) {
 			}
 
 			// Wait for timeout handler to be called
-			g.Eventually(func() bool { return timeoutCalled }, 3*time.Second).Should(BeTrue())
+			g.Eventually(func() bool { return timeoutCalled.Load() }, 3*time.Second).Should(BeTrue())
 		})
 
 		t.Run("WithProcessingTimeout should timeout messages", func(t *testing.T) {
@@ -596,7 +597,7 @@ func TestRedisSubscriber(t *testing.T) {
 			})
 
 			// Consumer 1 receives but doesn't ack
-			consumer1ProcessCount := 0
+			var consumer1ProcessCount atomic.Int32
 			go func() {
 				for {
 					select {
@@ -606,7 +607,7 @@ func TestRedisSubscriber(t *testing.T) {
 						if !ok {
 							return
 						}
-						consumer1ProcessCount++
+						consumer1ProcessCount.Add(1)
 						// Don't ack, leave it pending
 						_ = msg
 					}
@@ -614,7 +615,7 @@ func TestRedisSubscriber(t *testing.T) {
 			}()
 
 			// Wait for consumer 1 to receive message
-			g.Eventually(func() int { return consumer1ProcessCount }, 3*time.Second).Should(Equal(1))
+			g.Eventually(func() int { return int(consumer1ProcessCount.Load()) }, 3*time.Second).Should(Equal(1))
 
 			// Close consumer 1
 			consumer1.Close()
@@ -632,7 +633,7 @@ func TestRedisSubscriber(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred())
 			defer consumer2.Close()
 
-			consumer2ProcessCount := 0
+			var consumer2ProcessCount atomic.Int32
 			go func() {
 				for {
 					select {
@@ -642,14 +643,14 @@ func TestRedisSubscriber(t *testing.T) {
 						if !ok {
 							return
 						}
-						consumer2ProcessCount++
+						consumer2ProcessCount.Add(1)
 						msg.Ack()
 					}
 				}
 			}()
 
 			// Consumer 2 should claim the pending message
-			g.Eventually(func() int { return consumer2ProcessCount }, 8*time.Second).Should(Equal(1))
+			g.Eventually(func() int { return int(consumer2ProcessCount.Load()) }, 8*time.Second).Should(Equal(1))
 		})
 
 		t.Run("WithPendingMessageBatchSize should configure batch size", func(t *testing.T) {

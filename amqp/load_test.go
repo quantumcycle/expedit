@@ -67,6 +67,13 @@ func createLoadTestConnection() (*amqp.ReconnectingConnection, *amqp.Reconnectin
 	return conn, channel, nil
 }
 
+// snapshot returns a copy of the entry of a map that is written concurrently by the consumers.
+func snapshot(mu *sync.Mutex, m map[string][]string, key string) []string {
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]string(nil), m[key]...)
+}
+
 func findDuplicateMessages(msgs1 []string, msgs2 []string) []string {
 	duplicates := []string{}
 	for _, msg1 := range msgs1 {
@@ -274,8 +281,8 @@ func TestAMQPLoadTest(t *testing.T) {
 			consumer1ID := fmt.Sprintf("queue-%d-consumer-%d", queueIndex, 1)
 			consumer2ID := fmt.Sprintf("queue-%d-consumer-%d", queueIndex, 2)
 
-			consumer1Msgs := consumerCounts[consumer1ID]
-			consumer2Msgs := consumerCounts[consumer2ID]
+			consumer1Msgs := snapshot(&consumerMu, consumerCounts, consumer1ID)
+			consumer2Msgs := snapshot(&consumerMu, consumerCounts, consumer2ID)
 
 			totalMsgsForQueue := len(consumer1Msgs) + len(consumer2Msgs)
 			// Allow for variance due to nacked messages and load test timing

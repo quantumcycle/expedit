@@ -18,6 +18,13 @@ import (
 
 // Shared utilities for Redis load testing
 
+// snapshot returns a copy of the entry of a map that is written concurrently by the consumers.
+func snapshot(mu *sync.Mutex, m map[string][]string, key string) []string {
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]string(nil), m[key]...)
+}
+
 func randomInt(lower int, higher int) int {
 	return rand.IntN(higher-lower+1) + lower
 }
@@ -203,8 +210,8 @@ func TestRedisLoadTest(t *testing.T) {
 			consumer1ID := fmt.Sprintf("stream-%d-consumer-%d", streamIndex, 1)
 			consumer2ID := fmt.Sprintf("stream-%d-consumer-%d", streamIndex, 2)
 
-			consumer1Msgs := consumerCounts[consumer1ID]
-			consumer2Msgs := consumerCounts[consumer2ID]
+			consumer1Msgs := snapshot(&consumerMu, consumerCounts, consumer1ID)
+			consumer2Msgs := snapshot(&consumerMu, consumerCounts, consumer2ID)
 
 			totalMsgsForStream := len(consumer1Msgs) + len(consumer2Msgs)
 			expectedMsgsForStream := nbPublishersPerStream * nbMessagesToSendPerPublisher
@@ -376,11 +383,11 @@ func TestRedisLoadTest(t *testing.T) {
 		}, 30*time.Second).Should(Equal(int64(nbMessagesToSend)))
 
 		// Verify we had some nacks (simulated failures)
-		g.Expect(nackCount).To(BeNumerically(">", 0))
+		g.Expect(atomic.LoadInt64(&nackCount)).To(BeNumerically(">", 0))
 
 		// Verify recovery consumers processed some messages
-		recoveryConsumer1Msgs := consumerCounts["recovery-consumer-1"]
-		recoveryConsumer2Msgs := consumerCounts["recovery-consumer-2"]
+		recoveryConsumer1Msgs := snapshot(&consumerMu, consumerCounts, "recovery-consumer-1")
+		recoveryConsumer2Msgs := snapshot(&consumerMu, consumerCounts, "recovery-consumer-2")
 		totalRecoveryMsgs := len(recoveryConsumer1Msgs) + len(recoveryConsumer2Msgs)
 
 		g.Expect(totalRecoveryMsgs).To(BeNumerically(">", 0),
@@ -517,7 +524,7 @@ func TestRedisLoadTest(t *testing.T) {
 		}, 30*time.Second).Should(BeTrue())
 
 		// Verify we had some nacks due to simulated errors
-		g.Expect(nackCount).To(BeNumerically(">=", 0))
+		g.Expect(atomic.LoadInt64(&nackCount)).To(BeNumerically(">=", 0))
 
 		// Verify consumer distribution
 		for streamIndex := 0; streamIndex < nbStreams; streamIndex++ {
@@ -526,7 +533,7 @@ func TestRedisLoadTest(t *testing.T) {
 
 			for j := 1; j <= nbConsumersPerStream; j++ {
 				consumerID := fmt.Sprintf("stress-stream-%d-consumer-%d", streamIndex, j)
-				consumerMsgs := consumerCounts[consumerID]
+				consumerMsgs := snapshot(&consumerMu, consumerCounts, consumerID)
 				streamConsumerCounts = append(streamConsumerCounts, consumerMsgs)
 				totalMsgsForStream += len(consumerMsgs)
 			}
