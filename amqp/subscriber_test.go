@@ -3,7 +3,9 @@ package amqp_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -85,25 +87,6 @@ func (t *simpleToxiproxy) Cleanup() {
 	}
 }
 
-func asyncCountMessages(count *atomic.Int32, ch <-chan *message.Message, duration time.Duration) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), duration)
-		defer cancel()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case msg := <-ch:
-				if msg == nil {
-					return
-				}
-				count.Add(1)
-				msg.Ack()
-			}
-		}
-	}()
-}
-
 func createTestConnectionWithToxiproxy(toxi *simpleToxiproxy) (*amqp.ReconnectingConnection, *amqp.ReconnectingChannel, error) {
 	config := amqpgo.Config{
 		Vhost:      "/",
@@ -155,6 +138,22 @@ func createTestConnectionWithToxiproxy(toxi *simpleToxiproxy) (*amqp.Reconnectin
 	return conn, channel, nil
 }
 
+// closeOnce returns a function closing ch at most once, and registers it to run when the test ends, so a failing test
+// does not leave handlers blocked.
+func closeOnce(t *testing.T, ch chan struct{}) func() {
+	var once sync.Once
+	closeCh := func() { once.Do(func() { close(ch) }) }
+	t.Cleanup(closeCh)
+	return closeCh
+}
+
+func countTo(count *atomic.Int32) message.HandlerFunc {
+	return func(*message.Message) error {
+		count.Add(1)
+		return nil
+	}
+}
+
 func TestAMQPSubscriber(t *testing.T) {
 	t.Run("should return an error if the channel is missing", func(t *testing.T) {
 		g := NewGomegaWithT(t)
@@ -166,20 +165,15 @@ func TestAMQPSubscriber(t *testing.T) {
 
 	t.Run("should return an error if the queue does not exist", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		conn, channel, err := createTestConnectionWithToxiproxy(nil)
-		g.Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			channel.Close()
-			conn.Close()
-		}()
+		_, channel := newTestChannel(t)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		subscriber, err := amqp.NewAMQPSubscriber(channel, "non-existing-queue")
+		sub, err := amqp.NewAMQPSubscriber(channel, "non-existing-queue")
 		g.Expect(err).NotTo(HaveOccurred())
 
-		_, err = subscriber.Subscribe(ctx)
+		err = sub.Receive(ctx, func(*message.Message) error { return nil })
 		g.Expect(err).To(HaveOccurred())
 		g.Expect(err).To(MatchError(amqp.ErrQueueNotFound))
 	})
@@ -187,463 +181,165 @@ func TestAMQPSubscriber(t *testing.T) {
 	t.Run("when using a direct queue", func(t *testing.T) {
 		t.Run("should receives all messages sent to the queue", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-direct-queue")
+
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
 			g.Expect(err).NotTo(HaveOccurred())
 
-			queue := testrabbit.CreateDirectExchangeQueue(channel, "test-direct-queue")
-
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up queue resources: %v\n", r)
-					}
-				}()
-				if queue.QueueName != "" {
-					queue.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
-			_, err = channel.QueueDeclarePassive(queue.QueueName, false, false, false, false, nil)
-			g.Expect(err).NotTo(HaveOccurred(), "Queue should exist before subscriber creation")
-
-			subscriber, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			msgCh, err := subscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer subscriber.Close()
-
-			var msgCount atomic.Int32
-			ready := make(chan struct{})
-
-			go func() {
-				close(ready)
-
-				timeout := time.After(2 * time.Second)
-
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-msgCh:
-						if msg == nil {
-							return
-						}
-						msgCount.Add(1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			<-ready
-			time.Sleep(100 * time.Millisecond)
+			received := newStringSet()
+			startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+				received.Add(string(msg.Payload.([]byte)))
+				return nil
+			})
 
 			expectedMsgCount := 10
 			for i := 0; i < expectedMsgCount; i++ {
-				msgData := []byte(fmt.Sprintf("test message %d", i))
-				queue.PublishBytes(msgData, nil)
-				time.Sleep(5 * time.Millisecond)
+				queue.PublishBytes([]byte(fmt.Sprintf("test message %d", i)), nil)
 			}
 
-			g.Eventually(func() int {
-				return int(msgCount.Load())
-			}, 2*time.Second, 50*time.Millisecond).Should(Equal(expectedMsgCount))
+			g.Eventually(received.Len, 5*time.Second, 50*time.Millisecond).Should(Equal(expectedMsgCount))
+			for i := 0; i < expectedMsgCount; i++ {
+				g.Expect(received.Count(fmt.Sprintf("test message %d", i))).To(Equal(1))
+			}
 		})
 	})
 
 	t.Run("when testing network disconnection with toxiproxy", func(t *testing.T) {
 		t.Run("should reconnect and receive all the messages", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
 			toxi, err := setupToxiproxy()
 			if err != nil {
 				t.Skip("Toxiproxy not available, skipping network disconnection test")
 			}
+			t.Cleanup(toxi.Cleanup)
 
+			// The admin connection goes directly to the broker, the connection under test goes through the proxy
+			adminConn, _ := newTestChannel(t)
 			conn, channel, err := createTestConnectionWithToxiproxy(toxi)
 			g.Expect(err).NotTo(HaveOccurred())
+			t.Cleanup(func() {
+				_ = channel.Close()
+				_ = conn.Close()
+			})
 
-			queue := testrabbit.CreateDirectExchangeQueue(channel, "test-disconnect-queue")
+			queue := newTestQueue(t, adminConn, channel, "test-disconnect-queue")
 
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up toxiproxy test resources: %v\n", r)
-					}
-				}()
-				if queue.QueueName != "" {
-					queue.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-				if toxi != nil {
-					toxi.Cleanup()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-
-			subscriber, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
 			g.Expect(err).NotTo(HaveOccurred())
 
-			msgCh, err := subscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer subscriber.Close()
-
-			var msgCount atomic.Int32
-			asyncCountMessages(&msgCount, msgCh, 10*time.Second)
+			// A message can be delivered twice if its ack is lost with the connection, so count distinct messages
+			received := newStringSet()
+			startReceive(t, adminConn, sub, queue.QueueName, func(msg *message.Message) error {
+				received.Add(string(msg.Payload.([]byte)))
+				return nil
+			})
 
 			expectedMsgCount := 10
-
 			for i := 0; i < expectedMsgCount; i++ {
 				if i == 3 {
-					fmt.Printf("Simulating network disconnection after message %d...\n", i-1)
 					toxi.SimulateDisconnect()
-
-					time.Sleep(1 * time.Second)
-					fmt.Printf("Network should be reconnected, continuing to publish...\n")
 				}
 
-				queue.PublishBytes([]byte(fmt.Sprintf("test message %d", i)), nil)
-				time.Sleep(100 * time.Millisecond)
+				body := []byte(fmt.Sprintf("test message %d", i))
+				// Publishing fails until the channel is reconnected
+				g.Eventually(func() error {
+					return channel.Publish("", queue.QueueName, false, false, amqpgo.Publishing{
+						Body:         body,
+						ContentType:  "text/plain",
+						DeliveryMode: amqpgo.Persistent,
+					})
+				}, 15*time.Second, 100*time.Millisecond).Should(Succeed())
 			}
 
-			g.Eventually(func() int {
-				current := int(msgCount.Load())
-				fmt.Printf("Current message count: %d/%d\n", current, expectedMsgCount)
-				return current
-			}, 8*time.Second, 500*time.Millisecond).Should(Equal(expectedMsgCount))
+			g.Eventually(received.Len, 15*time.Second, 100*time.Millisecond).Should(Equal(expectedMsgCount))
 		})
 	})
 
 	t.Run("when using a fanout exchange", func(t *testing.T) {
 		t.Run("should receive messages published to the fanout exchange", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
-			g.Expect(err).NotTo(HaveOccurred())
+			conn, channel := newTestChannel(t)
 
 			exchange := testrabbit.CreateFanoutExchange(channel, "test-fanout-exchange", "queue1", "queue2")
-
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up exchange resources: %v\n", r)
-					}
-				}()
-				if exchange.ExchangeName != "" {
-					exchange.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
+			t.Cleanup(exchange.Delete)
 
 			subscriber1, err := amqp.NewAMQPSubscriber(channel, exchange.LogicalToActual["queue1"])
 			g.Expect(err).NotTo(HaveOccurred())
 			subscriber2, err := amqp.NewAMQPSubscriber(channel, exchange.LogicalToActual["queue2"])
 			g.Expect(err).NotTo(HaveOccurred())
 
-			msgCh1, err := subscriber1.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer subscriber1.Close()
-
-			msgCh2, err := subscriber2.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer subscriber2.Close()
-
-			var msgCount1 int32
-			var msgCount2 int32
-
-			ready := make(chan struct{}, 2)
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(2 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-msgCh1:
-						if msg == nil {
-							return
-						}
-						atomic.AddInt32(&msgCount1, 1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(2 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-msgCh2:
-						if msg == nil {
-							return
-						}
-						atomic.AddInt32(&msgCount2, 1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			<-ready
-			<-ready
+			var msgCount1, msgCount2 atomic.Int32
+			startReceive(t, conn, subscriber1, exchange.LogicalToActual["queue1"], countTo(&msgCount1))
+			startReceive(t, conn, subscriber2, exchange.LogicalToActual["queue2"], countTo(&msgCount2))
 
 			expectedMsgCount := 5
 			for i := 0; i < expectedMsgCount; i++ {
-				msgData := []byte(fmt.Sprintf("fanout test message %d", i))
-				exchange.PublishBytes(msgData, nil)
-				time.Sleep(30 * time.Millisecond)
+				exchange.PublishBytes([]byte(fmt.Sprintf("fanout test message %d", i)), nil)
 			}
 
-			g.Eventually(func() int {
-				return int(atomic.LoadInt32(&msgCount1))
-			}, 3*time.Second, 50*time.Millisecond).Should(Equal(expectedMsgCount))
-
-			g.Eventually(func() int {
-				return int(atomic.LoadInt32(&msgCount2))
-			}, 3*time.Second, 50*time.Millisecond).Should(Equal(expectedMsgCount))
+			g.Eventually(msgCount1.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(expectedMsgCount))
+			g.Eventually(msgCount2.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(expectedMsgCount))
 		})
 
 		t.Run("should handle multiple concurrent subscribers on the same fanout queue", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
-			g.Expect(err).NotTo(HaveOccurred())
+			conn, channel := newTestChannel(t)
 
 			exchange := testrabbit.CreateFanoutExchange(channel, "test-fanout-exchange", "queue1", "queue2")
+			t.Cleanup(exchange.Delete)
+			queueName := exchange.LogicalToActual["queue1"]
 
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up exchange resources: %v\n", r)
-					}
-				}()
-				if exchange.ExchangeName != "" {
-					exchange.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			subscriber1, err := amqp.NewAMQPSubscriber(channel, exchange.LogicalToActual["queue1"])
+			subscriber1, err := amqp.NewAMQPSubscriber(channel, queueName)
 			g.Expect(err).NotTo(HaveOccurred())
-			subscriber2, err := amqp.NewAMQPSubscriber(channel, exchange.LogicalToActual["queue1"])
+			subscriber2, err := amqp.NewAMQPSubscriber(channel, queueName)
 			g.Expect(err).NotTo(HaveOccurred())
 
-			msgCh1, err := subscriber1.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer subscriber1.Close()
-
-			msgCh2, err := subscriber2.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer subscriber2.Close()
-
-			var totalMsgCount int32
-			var msgCount1 int32
-			var msgCount2 int32
-
-			ready := make(chan struct{}, 2)
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(4 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-msgCh1:
-						if msg == nil {
-							return
-						}
-						atomic.AddInt32(&totalMsgCount, 1)
-						atomic.AddInt32(&msgCount1, 1)
-						msg.Ack()
-					}
+			received := newStringSet()
+			var msgCount1, msgCount2 atomic.Int32
+			record := func(count *atomic.Int32) message.HandlerFunc {
+				return func(msg *message.Message) error {
+					count.Add(1)
+					received.Add(string(msg.Payload.([]byte)))
+					return nil
 				}
-			}()
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(4 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-msgCh2:
-						if msg == nil {
-							return
-						}
-						atomic.AddInt32(&totalMsgCount, 1)
-						atomic.AddInt32(&msgCount2, 1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			<-ready
-			<-ready
-			time.Sleep(500 * time.Millisecond)
+			}
+			startReceive(t, conn, subscriber1, queueName, record(&msgCount1))
+			startReceive(t, conn, subscriber2, queueName, record(&msgCount2))
 
 			expectedMsgCount := 10
 			for i := 0; i < expectedMsgCount; i++ {
-				msgData := []byte(fmt.Sprintf("concurrent fanout test message %d", i))
-				exchange.PublishBytes(msgData, nil)
-				time.Sleep(30 * time.Millisecond)
+				exchange.PublishBytes([]byte(fmt.Sprintf("concurrent fanout test message %d", i)), nil)
 			}
 
 			g.Eventually(func() int {
-				count := int(atomic.LoadInt32(&totalMsgCount))
-				return count
-			}, 4*time.Second, 100*time.Millisecond).Should(Equal(expectedMsgCount),
-				"Expected %d total messages, got %d (subscriber1: %d, subscriber2: %d)",
-				expectedMsgCount, atomic.LoadInt32(&totalMsgCount), atomic.LoadInt32(&msgCount1), atomic.LoadInt32(&msgCount2))
+				return int(msgCount1.Load() + msgCount2.Load())
+			}, 5*time.Second, 50*time.Millisecond).Should(Equal(expectedMsgCount),
+				"subscriber1: %d, subscriber2: %d", msgCount1.Load(), msgCount2.Load())
+			g.Expect(received.Len()).To(Equal(expectedMsgCount))
 		})
 	})
 
 	t.Run("when using a topic exchange", func(t *testing.T) {
 		t.Run("should receive messages that match the topic pattern", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
-			g.Expect(err).NotTo(HaveOccurred())
+			conn, channel := newTestChannel(t)
 
 			exchange := testrabbit.CreateTopicExchange(channel, "test-topic-exchange",
 				"logs.*", "events.#", "alerts.critical")
+			t.Cleanup(exchange.Delete)
 
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up exchange resources: %v\n", r)
-					}
-				}()
-				if exchange.ExchangeName != "" {
-					exchange.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
-			logsSubscriber, err := amqp.NewAMQPSubscriber(channel, exchange.PatternToQueue["logs.*"])
-			g.Expect(err).NotTo(HaveOccurred())
-			eventsSubscriber, err := amqp.NewAMQPSubscriber(channel, exchange.PatternToQueue["events.#"])
-			g.Expect(err).NotTo(HaveOccurred())
-			alertsSubscriber, err := amqp.NewAMQPSubscriber(channel, exchange.PatternToQueue["alerts.critical"])
-			g.Expect(err).NotTo(HaveOccurred())
-
-			logsCh, err := logsSubscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer logsSubscriber.Close()
-
-			eventsCh, err := eventsSubscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer eventsSubscriber.Close()
-
-			alertsCh, err := alertsSubscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer alertsSubscriber.Close()
-
-			var logsCount atomic.Int32
-			var eventsCount atomic.Int32
-			var alertsCount atomic.Int32
-
-			ready := make(chan struct{}, 3)
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(3 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-logsCh:
-						if msg == nil {
-							return
-						}
-						logsCount.Add(1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(3 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-eventsCh:
-						if msg == nil {
-							return
-						}
-						eventsCount.Add(1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(3 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-alertsCh:
-						if msg == nil {
-							return
-						}
-						alertsCount.Add(1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			<-ready
-			<-ready
-			<-ready
-			time.Sleep(100 * time.Millisecond)
+			var logsCount, eventsCount, alertsCount atomic.Int32
+			for pattern, count := range map[string]*atomic.Int32{
+				"logs.*":          &logsCount,
+				"events.#":        &eventsCount,
+				"alerts.critical": &alertsCount,
+			} {
+				queueName := exchange.PatternToQueue[pattern]
+				sub, err := amqp.NewAMQPSubscriber(channel, queueName)
+				g.Expect(err).NotTo(HaveOccurred())
+				startReceive(t, conn, sub, queueName, countTo(count))
+			}
 
 			testMessages := []struct {
 				routing string
@@ -657,133 +353,34 @@ func TestAMQPSubscriber(t *testing.T) {
 				{"alerts.warning", "warning alert"},
 				{"unmatched.routing", "should not match any pattern"},
 			}
-
 			for _, msgData := range testMessages {
 				exchange.PublishBytes([]byte(msgData.content), nil, msgData.routing)
-				time.Sleep(20 * time.Millisecond)
 			}
 
-			g.Eventually(func() int {
-				return int(logsCount.Load())
-			}, 3*time.Second, 50*time.Millisecond).Should(Equal(2))
-
-			g.Eventually(func() int {
-				return int(eventsCount.Load())
-			}, 3*time.Second, 50*time.Millisecond).Should(Equal(2))
-
-			g.Eventually(func() int {
-				return int(alertsCount.Load())
-			}, 3*time.Second, 50*time.Millisecond).Should(Equal(1))
+			g.Eventually(logsCount.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(2))
+			g.Eventually(eventsCount.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(2))
+			g.Eventually(alertsCount.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(1))
 		})
 
 		t.Run("should handle complex topic patterns with wildcards", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
-			g.Expect(err).NotTo(HaveOccurred())
+			conn, channel := newTestChannel(t)
 
 			exchange := testrabbit.CreateTopicExchange(channel, "complex-topic",
 				"*.critical", "#.error", "system.#")
+			t.Cleanup(exchange.Delete)
 
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up exchange resources: %v\n", r)
-					}
-				}()
-				if exchange.ExchangeName != "" {
-					exchange.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
-			anyCritical, err := amqp.NewAMQPSubscriber(channel, exchange.PatternToQueue["*.critical"])
-			g.Expect(err).NotTo(HaveOccurred())
-			anyError, err := amqp.NewAMQPSubscriber(channel, exchange.PatternToQueue["#.error"])
-			g.Expect(err).NotTo(HaveOccurred())
-			systemAll, err := amqp.NewAMQPSubscriber(channel, exchange.PatternToQueue["system.#"])
-			g.Expect(err).NotTo(HaveOccurred())
-
-			criticalCh, err := anyCritical.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer anyCritical.Close()
-
-			errorCh, err := anyError.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer anyError.Close()
-
-			systemCh, err := systemAll.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer systemAll.Close()
-
-			var criticalCount int32
-			var errorCount int32
-			var systemCount int32
-
-			ready := make(chan struct{}, 3)
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(2 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-criticalCh:
-						if msg == nil {
-							return
-						}
-						atomic.AddInt32(&criticalCount, 1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(2 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-errorCh:
-						if msg == nil {
-							return
-						}
-						atomic.AddInt32(&errorCount, 1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(2 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-systemCh:
-						if msg == nil {
-							return
-						}
-						atomic.AddInt32(&systemCount, 1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			<-ready
-			<-ready
-			<-ready
+			var criticalCount, errorCount, systemCount atomic.Int32
+			for pattern, count := range map[string]*atomic.Int32{
+				"*.critical": &criticalCount,
+				"#.error":    &errorCount,
+				"system.#":   &systemCount,
+			} {
+				queueName := exchange.PatternToQueue[pattern]
+				sub, err := amqp.NewAMQPSubscriber(channel, queueName)
+				g.Expect(err).NotTo(HaveOccurred())
+				startReceive(t, conn, sub, queueName, countTo(count))
+			}
 
 			testMessages := []struct {
 				routing string
@@ -796,32 +393,20 @@ func TestAMQPSubscriber(t *testing.T) {
 				{"system.metrics.cpu", "cpu metrics"},
 				{"network.connection.error", "network error"},
 			}
-
 			for _, msgData := range testMessages {
 				exchange.PublishBytes([]byte(msgData.content), nil, msgData.routing)
-				time.Sleep(10 * time.Millisecond)
 			}
 
-			g.Eventually(func() int {
-				return int(atomic.LoadInt32(&criticalCount))
-			}, 2*time.Second, 50*time.Millisecond).Should(Equal(2))
-
-			g.Eventually(func() int {
-				return int(atomic.LoadInt32(&errorCount))
-			}, 2*time.Second, 50*time.Millisecond).Should(Equal(2))
-
-			g.Eventually(func() int {
-				return int(atomic.LoadInt32(&systemCount))
-			}, 2*time.Second, 50*time.Millisecond).Should(Equal(2))
+			g.Eventually(criticalCount.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(2))
+			g.Eventually(errorCount.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(2))
+			g.Eventually(systemCount.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(2))
 		})
 	})
 
 	t.Run("when using a headers exchange", func(t *testing.T) {
 		t.Run("should receive messages that match header bindings", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
-			g.Expect(err).NotTo(HaveOccurred())
+			conn, channel := newTestChannel(t)
 
 			exchange := testrabbit.CreateHeadersExchange(channel, "test-headers-exchange",
 				testrabbit.HeaderBinding{
@@ -834,82 +419,18 @@ func TestAMQPSubscriber(t *testing.T) {
 					Headers:    amqpgo.Table{"priority": "urgent", "category": "alert", "service": "auth"},
 					MatchType:  "any",
 				})
+			t.Cleanup(exchange.Delete)
 
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up exchange resources: %v\n", r)
-					}
-				}()
-				if exchange.ExchangeName != "" {
-					exchange.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
-			errorCriticalSub, err := amqp.NewAMQPSubscriber(channel, exchange.HeadersToQueue["error-critical"])
-			g.Expect(err).NotTo(HaveOccurred())
-			anyUrgentSub, err := amqp.NewAMQPSubscriber(channel, exchange.HeadersToQueue["any-urgent"])
-			g.Expect(err).NotTo(HaveOccurred())
-
-			errorCriticalCh, err := errorCriticalSub.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer errorCriticalSub.Close()
-
-			anyUrgentCh, err := anyUrgentSub.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer anyUrgentSub.Close()
-
-			var errorCriticalCount atomic.Int32
-			var anyUrgentCount atomic.Int32
-
-			ready := make(chan struct{}, 2)
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(2 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-errorCriticalCh:
-						if msg == nil {
-							return
-						}
-						errorCriticalCount.Add(1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			go func() {
-				ready <- struct{}{}
-				timeout := time.After(2 * time.Second)
-				for {
-					select {
-					case <-timeout:
-						return
-					case msg := <-anyUrgentCh:
-						if msg == nil {
-							return
-						}
-						anyUrgentCount.Add(1)
-						msg.Ack()
-					}
-				}
-			}()
-
-			<-ready
-			<-ready
-			time.Sleep(100 * time.Millisecond)
+			var errorCriticalCount, anyUrgentCount atomic.Int32
+			for binding, count := range map[string]*atomic.Int32{
+				"error-critical": &errorCriticalCount,
+				"any-urgent":     &anyUrgentCount,
+			} {
+				queueName := exchange.HeadersToQueue[binding]
+				sub, err := amqp.NewAMQPSubscriber(channel, queueName)
+				g.Expect(err).NotTo(HaveOccurred())
+				startReceive(t, conn, sub, queueName, countTo(count))
+			}
 
 			testMessages := []struct {
 				content string
@@ -923,156 +444,348 @@ func TestAMQPSubscriber(t *testing.T) {
 				{"partial match", map[string]interface{}{"type": "error", "level": "warning"}},
 				{"no match", map[string]interface{}{"unrelated": "header"}},
 			}
-
 			for _, msgData := range testMessages {
 				exchange.PublishBytes([]byte(msgData.content), msgData.headers)
-				time.Sleep(5 * time.Millisecond)
 			}
 
-			g.Eventually(func() int {
-				return int(errorCriticalCount.Load())
-			}, 2*time.Second, 50*time.Millisecond).Should(Equal(2))
+			g.Eventually(errorCriticalCount.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(2))
+			g.Eventually(anyUrgentCount.Load, 5*time.Second, 50*time.Millisecond).Should(BeEquivalentTo(4))
+		})
+	})
 
+	t.Run("message conversion", func(t *testing.T) {
+		t.Run("should give the message an empty, non-nil metadata when the delivery has no headers", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-no-headers-queue")
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			received := make(chan *message.Message, 1)
+			startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+				received <- msg
+				return nil
+			})
+
+			queue.PublishBytes([]byte("no headers"), nil)
+
+			var msg *message.Message
+			g.Eventually(received, 5*time.Second).Should(Receive(&msg))
+			g.Expect(msg.Metadata).NotTo(BeNil())
+			g.Expect(msg.Metadata).To(BeEmpty())
+			g.Expect(string(msg.Payload.([]byte))).To(Equal("no headers"))
+		})
+
+		t.Run("should give the message the headers as metadata, and the message id", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-headers-queue")
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			received := make(chan *message.Message, 1)
+			startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+				received <- msg
+				return nil
+			})
+
+			g.Expect(channel.Publish("", queue.QueueName, false, false, amqpgo.Publishing{
+				Body:      []byte("with headers"),
+				MessageId: "message-1",
+				Headers:   amqpgo.Table{"source": "test"},
+			})).To(Succeed())
+
+			var msg *message.Message
+			g.Eventually(received, 5*time.Second).Should(Receive(&msg))
+			g.Expect(msg.ID).To(Equal("message-1"))
+			g.Expect(msg.Metadata).To(HaveKeyWithValue("source", "test"))
+		})
+	})
+
+	t.Run("acknowledgement", func(t *testing.T) {
+		t.Run("should redeliver a message when the handler returns an error", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-nack-requeue-queue")
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var attempts atomic.Int32
+			startReceive(t, conn, sub, queue.QueueName, func(*message.Message) error {
+				if attempts.Add(1) == 1 {
+					return errors.New("first attempt fails")
+				}
+				return nil
+			})
+
+			queue.PublishBytes([]byte("retry me"), nil)
+
+			g.Eventually(attempts.Load, 5*time.Second, 20*time.Millisecond).Should(BeEquivalentTo(2))
+			// The second attempt was acked, so nothing is left in the queue
 			g.Eventually(func() int {
-				return int(anyUrgentCount.Load())
-			}, 2*time.Second, 50*time.Millisecond).Should(Equal(4))
+				ready, _ := queueState(g, conn, queue.QueueName)
+				return ready
+			}, 5*time.Second, 20*time.Millisecond).Should(Equal(0))
+			g.Consistently(attempts.Load, 300*time.Millisecond, 50*time.Millisecond).Should(BeEquivalentTo(2))
+		})
+
+		t.Run("should not redeliver a message nacked with WithNoRequeueOnNack", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-nack-no-requeue-queue")
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName, amqp.WithNoRequeueOnNack())
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var attempts atomic.Int32
+			startReceive(t, conn, sub, queue.QueueName, func(*message.Message) error {
+				attempts.Add(1)
+				return errors.New("always fails")
+			})
+
+			queue.PublishBytes([]byte("drop me"), nil)
+
+			g.Eventually(attempts.Load, 5*time.Second, 20*time.Millisecond).Should(BeEquivalentTo(1))
+			g.Consistently(func() int {
+				ready, _ := queueState(g, conn, queue.QueueName)
+				return ready + int(attempts.Load()) - 1
+			}, 500*time.Millisecond, 50*time.Millisecond).Should(Equal(0))
+		})
+
+		t.Run("should call the ack error handler when acking fails", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-ack-error-queue")
+
+			ackErrors := make(chan error, 1)
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName,
+				amqp.WithAckErrorHandler(func(msg *message.Message, err error) { ackErrors <- err }))
+			g.Expect(err).NotTo(HaveOccurred())
+
+			handling := make(chan struct{})
+			release := make(chan struct{})
+			run := startReceive(t, conn, sub, queue.QueueName, func(*message.Message) error {
+				close(handling)
+				<-release
+				return nil
+			})
+			releaseHandler := closeOnce(t, release)
+
+			queue.PublishBytes([]byte("ack fails"), nil)
+			g.Eventually(handling, 5*time.Second).Should(BeClosed())
+
+			// The ack runs on the closed channel
+			g.Expect(channel.Close()).To(Succeed())
+			releaseHandler()
+
+			g.Eventually(ackErrors, 5*time.Second).Should(Receive(HaveOccurred()))
+			g.Expect(run.Wait()).To(MatchError(amqp.ErrChannelClosed))
 		})
 	})
 
 	t.Run("subscriber options", func(t *testing.T) {
 		t.Run("should handle WithAutoAck option", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-options-queue")
+
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName, amqp.WithAutoAck())
 			g.Expect(err).NotTo(HaveOccurred())
 
-			queue := testrabbit.CreateDirectExchangeQueue(channel, "test-options-queue")
-
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up queue resources: %v\n", r)
-					}
-				}()
-				if queue.QueueName != "" {
-					queue.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
-			subscriber, err := amqp.NewAMQPSubscriber(channel,
-				queue.QueueName,
-				amqp.WithAutoAck())
-			g.Expect(err).NotTo(HaveOccurred())
-
-			msgCh, err := subscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer subscriber.Close()
+			var attempts atomic.Int32
+			received := make(chan string, 1)
+			startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+				attempts.Add(1)
+				received <- string(msg.Payload.([]byte))
+				// With auto ack the broker already forgot the message, so the nack does nothing
+				return errors.New("fails")
+			})
 
 			queue.PublishBytes([]byte("auto-ack test"), nil)
 
-			select {
-			case msg := <-msgCh:
-				g.Expect(msg).NotTo(BeNil())
-				g.Expect(string(msg.Payload.([]byte))).To(Equal("auto-ack test"))
-			case <-ctx.Done():
-				g.Fail("Did not receive message within timeout")
-			}
+			g.Eventually(received, 5*time.Second).Should(Receive(Equal("auto-ack test")))
+			g.Consistently(func() int {
+				ready, _ := queueState(g, conn, queue.QueueName)
+				return ready + int(attempts.Load()) - 1
+			}, 500*time.Millisecond, 50*time.Millisecond).Should(Equal(0))
 		})
 
-		t.Run("should handle WithProcessingTimeout option", func(t *testing.T) {
+		t.Run("should put the WithProcessingTimeout deadline on the context of the message", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-timeout-queue")
+
+			timeout := time.Minute
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName, amqp.WithProcessingTimeout(timeout))
 			g.Expect(err).NotTo(HaveOccurred())
 
-			queue := testrabbit.CreateDirectExchangeQueue(channel, "test-options-queue")
-
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up queue resources: %v\n", r)
-					}
-				}()
-				if queue.QueueName != "" {
-					queue.Delete()
+			received := time.Now()
+			deadlines := make(chan time.Time, 1)
+			startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+				deadline, ok := msg.Context().Deadline()
+				if !ok {
+					return errors.New("the context has no deadline")
 				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			var timeoutCalled int32
-			subscriber, err := amqp.NewAMQPSubscriber(channel,
-				queue.QueueName,
-				amqp.WithProcessingTimeout(100*time.Millisecond),
-				amqp.WithProcessingTimeoutHandler(func(ctx context.Context, msg *amqpgo.Delivery) {
-					atomic.StoreInt32(&timeoutCalled, 1)
-				}))
-			g.Expect(err).NotTo(HaveOccurred())
-
-			msgCh, err := subscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-			defer subscriber.Close()
+				deadlines <- deadline
+				return nil
+			})
 
 			queue.PublishBytes([]byte("timeout test"), nil)
-			time.Sleep(10 * time.Millisecond)
 
-			select {
-			case msg := <-msgCh:
-				g.Expect(msg).NotTo(BeNil())
-				g.Expect(string(msg.Payload.([]byte))).To(Equal("timeout test"))
-				time.Sleep(200 * time.Millisecond)
-				msg.Ack()
-			case <-ctx.Done():
-				g.Fail("Did not receive message within timeout")
+			var deadline time.Time
+			g.Eventually(deadlines, 5*time.Second).Should(Receive(&deadline))
+			g.Expect(deadline).To(BeTemporally(">", received))
+			g.Expect(deadline).To(BeTemporally("<=", time.Now().Add(timeout)))
+		})
+
+		t.Run("should not put a deadline on the context of the message by default", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-no-timeout-queue")
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			hasDeadline := make(chan bool, 1)
+			startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+				_, ok := msg.Context().Deadline()
+				hasDeadline <- ok
+				return nil
+			})
+
+			queue.PublishBytes([]byte("no timeout"), nil)
+
+			g.Eventually(hasDeadline, 5*time.Second).Should(Receive(BeFalse()))
+		})
+
+		t.Run("should nack and redeliver a message whose processing timed out", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-timeout-nack-queue")
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName, amqp.WithProcessingTimeout(100*time.Millisecond))
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var attempts atomic.Int32
+			firstAttemptErr := make(chan error, 1)
+			startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+				if attempts.Add(1) == 1 {
+					<-msg.Context().Done()
+					firstAttemptErr <- msg.Context().Err()
+					return msg.Context().Err()
+				}
+				return nil
+			})
+
+			queue.PublishBytes([]byte("too slow"), nil)
+
+			g.Eventually(firstAttemptErr, 5*time.Second).Should(Receive(MatchError(context.DeadlineExceeded)))
+			g.Eventually(attempts.Load, 5*time.Second, 20*time.Millisecond).Should(BeEquivalentTo(2))
+		})
+
+		t.Run("should handle at most WithMaxInFlight messages at the same time", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-max-in-flight-queue")
+
+			maxInFlight := 3
+			totalMessages := 9
+			// The prefetch is at least MaxInFlight, so the broker delivers more messages than are handled
+			g.Expect(channel.Qos(totalMessages, 0, false)).To(Succeed())
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName, amqp.WithMaxInFlight(maxInFlight))
+			g.Expect(err).NotTo(HaveOccurred())
+
+			var running, highestRunning, done atomic.Int32
+			gate := make(chan struct{})
+			openGate := closeOnce(t, gate)
+			startReceive(t, conn, sub, queue.QueueName, func(*message.Message) error {
+				n := running.Add(1)
+				for {
+					highest := highestRunning.Load()
+					if n <= highest || highestRunning.CompareAndSwap(highest, n) {
+						break
+					}
+				}
+				<-gate
+				running.Add(-1)
+				done.Add(1)
+				return nil
+			})
+
+			for i := 0; i < totalMessages; i++ {
+				queue.PublishBytes([]byte(fmt.Sprintf("message %d", i)), nil)
 			}
 
-			g.Eventually(func() bool {
-				return atomic.LoadInt32(&timeoutCalled) == 1
-			}, 2*time.Second).Should(BeTrue())
+			g.Eventually(running.Load, 5*time.Second, 10*time.Millisecond).Should(BeEquivalentTo(maxInFlight))
+			g.Consistently(highestRunning.Load, 300*time.Millisecond, 10*time.Millisecond).Should(BeEquivalentTo(maxInFlight))
+
+			openGate()
+			g.Eventually(done.Load, 5*time.Second, 10*time.Millisecond).Should(BeEquivalentTo(totalMessages))
+			g.Expect(highestRunning.Load()).To(BeEquivalentTo(maxInFlight))
+		})
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		t.Run("should return nil only after the in-flight handlers returned, and ack their messages", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-graceful-shutdown-queue")
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			handling := make(chan struct{})
+			release := make(chan struct{})
+			var handlerReturned atomic.Bool
+			handlerCtxErr := make(chan error, 1)
+			releaseHandler := closeOnce(t, release)
+			run := startReceive(t, conn, sub, queue.QueueName, func(msg *message.Message) error {
+				close(handling)
+				<-release
+				handlerCtxErr <- msg.Context().Err()
+				handlerReturned.Store(true)
+				return nil
+			})
+
+			queue.PublishBytes([]byte("in flight"), nil)
+			g.Eventually(handling, 5*time.Second).Should(BeClosed())
+
+			stopped := make(chan error, 1)
+			go func() { stopped <- run.Stop() }()
+
+			// Receive waits for the handler, which is not told about the shutdown
+			g.Consistently(run.Finished(), 300*time.Millisecond, 20*time.Millisecond).ShouldNot(BeClosed())
+			releaseHandler()
+
+			g.Eventually(stopped, 5*time.Second).Should(Receive(BeNil()))
+			g.Expect(handlerReturned.Load()).To(BeTrue())
+			g.Expect(<-handlerCtxErr).NotTo(HaveOccurred(), "the shutdown must not cancel the context of the message")
+
+			// The message was acked: closing the channel requeues the unacked messages, and there are none
+			g.Expect(channel.Close()).To(Succeed())
+			ready, _ := queueState(g, conn, queue.QueueName)
+			g.Expect(ready).To(Equal(0))
+		})
+
+		t.Run("should return nil when the context is cancelled while no message is handled", func(t *testing.T) {
+			g := NewGomegaWithT(t)
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "test-idle-shutdown-queue")
+			sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			run := startReceive(t, conn, sub, queue.QueueName, func(*message.Message) error { return nil })
+
+			g.Expect(run.Stop()).To(Succeed())
+			// The consumer is cancelled on the broker
+			g.Eventually(func() int {
+				_, consumers := queueState(g, conn, queue.QueueName)
+				return consumers
+			}, 5*time.Second, 20*time.Millisecond).Should(Equal(0))
 		})
 	})
 
 	t.Run("JSON unmarshalling integration", func(t *testing.T) {
 		t.Run("should unmarshal JSON payload to struct", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			queue := testrabbit.CreateDirectExchangeQueue(channel, "json-test-queue")
-
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up queue resources: %v\n", r)
-					}
-				}()
-				if queue.QueueName != "" {
-					queue.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "json-test-queue")
 
 			type TestData struct {
 				Name   string `json:"name"`
@@ -1091,11 +804,6 @@ func TestAMQPSubscriber(t *testing.T) {
 			jsonData, err := json.Marshal(expectedData)
 			g.Expect(err).NotTo(HaveOccurred())
 
-			queue.PublishBytes(jsonData, amqpgo.Table{"content-type": "application/json"})
-
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
 			amqpSubscriber, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
 			g.Expect(err).NotTo(HaveOccurred())
 
@@ -1103,58 +811,25 @@ func TestAMQPSubscriber(t *testing.T) {
 				return subscriber.RoutingKey("default")
 			})
 
-			var receivedData TestData
-			var messageReceived atomic.Bool
-
+			receivedData := make(chan TestData, 1)
 			router.AddHandler("default").Handle(func(msg *message.Message) error {
-				receivedData = msg.Payload.(TestData)
-				messageReceived.Store(true)
+				receivedData <- msg.Payload.(TestData)
 				return nil
 			})
 
 			subEngine := subscriber.NewSubscriptionEngine(amqpSubscriber, *router).
 				AddMiddleware(amqp.UnmarshallPayloadFromJson(TestData{}))
+			startReceiveFunc(t, conn, queue.QueueName, subEngine.Start)
 
-			go func() {
-				err := subEngine.Start(ctx)
-				if err != nil {
-					fmt.Printf("Subscription engine error: %v\n", err)
-				}
-			}()
+			queue.PublishBytes(jsonData, amqpgo.Table{"content-type": "application/json"})
 
-			time.Sleep(100 * time.Millisecond)
-
-			g.Eventually(func() bool {
-				return messageReceived.Load()
-			}, 2*time.Second, 50*time.Millisecond).Should(BeTrue())
-
-			g.Expect(receivedData).To(Equal(expectedData))
+			g.Eventually(receivedData, 5*time.Second).Should(Receive(Equal(expectedData)))
 		})
 
 		t.Run("should handle round-trip JSON marshalling and unmarshalling", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			var err error
-			conn, channel, err := createTestConnectionWithToxiproxy(nil)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			queue := testrabbit.CreateDirectExchangeQueue(channel, "json-test-queue")
-
-			defer func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Warning: Failed to clean up queue resources: %v\n", r)
-					}
-				}()
-				if queue.QueueName != "" {
-					queue.Delete()
-				}
-				if channel != nil {
-					channel.Close()
-				}
-				if conn != nil {
-					conn.Close()
-				}
-			}()
+			conn, channel := newTestChannel(t)
+			queue := newTestQueue(t, conn, channel, "json-test-queue")
 
 			type Product struct {
 				ID          string   `json:"id"`
@@ -1175,9 +850,6 @@ func TestAMQPSubscriber(t *testing.T) {
 				Description: &description,
 			}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-
 			pub, err := amqp.NewAMQPPublisher(
 				channel,
 				publisher.ConstantDestination(publisher.Destination("")),
@@ -1192,7 +864,7 @@ func TestAMQPSubscriber(t *testing.T) {
 			pubEngine := publisher.NewPublishingEngine(pub).
 				AddMiddleware(amqp.MarshallPayloadToJson())
 
-			msg := message.NewMessage(ctx, originalProduct)
+			msg := message.NewMessage(context.Background(), originalProduct)
 			msg.ID = "round-trip-test"
 			err = pubEngine.Publish(msg)
 			g.Expect(err).NotTo(HaveOccurred())
@@ -1204,32 +876,17 @@ func TestAMQPSubscriber(t *testing.T) {
 				return subscriber.RoutingKey("default")
 			})
 
-			var receivedProduct Product
-			var messageReceived atomic.Bool
-
+			receivedProduct := make(chan Product, 1)
 			router.AddHandler("default").Handle(func(msg *message.Message) error {
-				receivedProduct = msg.Payload.(Product)
-				messageReceived.Store(true)
+				receivedProduct <- msg.Payload.(Product)
 				return nil
 			})
 
 			subEngine := subscriber.NewSubscriptionEngine(amqpSubscriber, *router).
 				AddMiddleware(amqp.UnmarshallPayloadFromJson(Product{}))
+			startReceiveFunc(t, conn, queue.QueueName, subEngine.Start)
 
-			go func() {
-				err := subEngine.Start(ctx)
-				if err != nil {
-					fmt.Printf("Subscription engine error: %v\n", err)
-				}
-			}()
-
-			time.Sleep(100 * time.Millisecond)
-
-			g.Eventually(func() bool {
-				return messageReceived.Load()
-			}, 2*time.Second, 50*time.Millisecond).Should(BeTrue())
-
-			g.Expect(receivedProduct).To(Equal(originalProduct))
+			g.Eventually(receivedProduct, 5*time.Second).Should(Receive(Equal(originalProduct)))
 		})
 	})
 }

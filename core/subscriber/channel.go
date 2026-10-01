@@ -2,110 +2,76 @@ package subscriber
 
 import (
 	"context"
+
 	"github.com/quantumcycle/expedit/core/message"
-	"github.com/sourcegraph/conc/pool"
-	"sync"
 )
 
+// ChannelSubscriber receives the messages sent to a Go channel, for example by a ChannelPublisher. A nacked message
+// is handled again. Messages nacked during a shutdown are dropped.
 type ChannelSubscriber struct {
-	inputCh       chan *message.Message
-	maxConcurrent int
-
-	// closeLock protects inputCh against a send after it is closed by Close.
-	closeLock sync.RWMutex
-	closeOnce sync.Once
-	closing   chan struct{}
+	inputCh     <-chan *message.Message
+	maxInFlight int
 }
 
-// Close closes the input channel. Messages nacked after that are dropped instead of being requeued.
-func (c *ChannelSubscriber) Close() error {
-	c.closeOnce.Do(func() {
-		// Wake up the pending requeues so they release the lock
-		close(c.closing)
-		c.closeLock.Lock()
-		defer c.closeLock.Unlock()
-		close(c.inputCh)
-	})
-	return nil
-}
-
-// Err always returns nil, a channel subscriber cannot fail.
-func (c *ChannelSubscriber) Err() error {
-	return nil
-}
-
-// requeue puts a nacked message back in the input channel for another pass.
-// It gives up when the context is done or the subscriber is closed.
-func (c *ChannelSubscriber) requeue(ctx context.Context, msg *message.Message) {
-	c.closeLock.RLock()
-	defer c.closeLock.RUnlock()
-	select {
-	case <-c.closing:
-		return
-	default:
-	}
-	defer func() {
-		//The input channel can also be closed by its owner, in which case there is nowhere to requeue the message
-		recover()
-	}()
-	select {
-	case c.inputCh <- msg:
-	case <-c.closing:
-	case <-ctx.Done():
-	}
-}
-
-func (c *ChannelSubscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {
-	outputCh := make(chan *message.Message, c.maxConcurrent)
-	go func() {
-		p := pool.New().WithMaxGoroutines(c.maxConcurrent)
-		defer func() {
-			// wait for the in-flight messages (they stop waiting on ctx.Done) before closing the output
-			p.Wait()
-			close(outputCh)
-		}()
-		for {
-			select {
-			case msg, ok := <-c.inputCh:
-				// handle channel closing case
-				if !ok || msg == nil {
-					return
-				}
-				msgCopy := msg.Copy()
-				withCancelCtx, msgCtxCancel := context.WithCancel(msgCopy.Context())
-				msgCopy.SetContext(withCancelCtx)
-				// Subscribe to the state before the message is sent out, otherwise the change could be missed
-				stateCh := msgCopy.StateChange()
-				p.Go(func() {
-					defer msgCtxCancel()
-					select {
-					case state := <-stateCh:
-						if state == message.Nack {
-							c.requeue(ctx, msg)
-						}
-					case <-ctx.Done():
-					}
-				})
-				select {
-				case outputCh <- msgCopy:
-				case <-ctx.Done():
-					return
-				}
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	return outputCh, nil
-}
-
-func NewChannelSubscriber(inputCh chan *message.Message, maxConcurrent int) *ChannelSubscriber {
-	if maxConcurrent <= 0 {
-		maxConcurrent = 1
+func NewChannelSubscriber(inputCh <-chan *message.Message, maxInFlight int) *ChannelSubscriber {
+	if maxInFlight <= 0 {
+		maxInFlight = 1
 	}
 	return &ChannelSubscriber{
-		inputCh:       inputCh,
-		maxConcurrent: maxConcurrent,
-		closing:       make(chan struct{}),
+		inputCh:     inputCh,
+		maxInFlight: maxInFlight,
+	}
+}
+
+// Receive handles the messages of the input channel until ctx is done or the input channel is closed and all its
+// messages are handled. It always returns nil.
+func (c *ChannelSubscriber) Receive(ctx context.Context, handler message.HandlerFunc) error {
+	d := NewDispatcher(handler, DispatchOptions{MaxInFlight: c.maxInFlight})
+	// A message is either in flight, waiting for a slot in Dispatch, or waiting here to be handled again, so at most
+	// maxInFlight+1 messages are ever in retry and sending to it never blocks.
+	retry := make(chan *message.Message, c.maxInFlight+1)
+	dispatch := func(msg *message.Message) {
+		// Handle a copy, so a new attempt is not affected by the changes of the previous one
+		d.Dispatch(ctx, Delivery{
+			Message: msg.Copy(),
+			Ack:     func(context.Context) error { return nil },
+			Nack: func(context.Context) error {
+				retry <- msg
+				return nil
+			},
+		})
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			d.Wait()
+			return nil
+		case msg := <-retry:
+			dispatch(msg)
+		case msg, ok := <-c.inputCh:
+			if !ok {
+				return c.drain(ctx, d, retry, dispatch)
+			}
+			if msg != nil {
+				dispatch(msg)
+			}
+		}
+	}
+}
+
+// drain handles the nacked messages again until none is left, after the input channel is closed.
+func (c *ChannelSubscriber) drain(ctx context.Context, d *Dispatcher, retry chan *message.Message, dispatch func(*message.Message)) error {
+	for {
+		d.Wait()
+		if ctx.Err() != nil {
+			return nil
+		}
+		select {
+		case msg := <-retry:
+			dispatch(msg)
+		default:
+			return nil
+		}
 	}
 }

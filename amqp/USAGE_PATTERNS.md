@@ -60,6 +60,29 @@ channel.QueueBind(queueName, "", exchangeName, false, args)
 
 **Important**: The subscriber must consume from a queue that is bound to the exchange with the appropriate routing key/pattern/headers that match what the publisher sends.
 
+## Receiving Messages
+
+A subscriber is driven by `Receive(ctx, handler)`. It blocks, calls the handler for each message, and acknowledges the message from the result of the handler:
+
+- The handler returns `nil`: the message is acked (`delivery.Ack(false)`).
+- The handler returns an error: the message is nacked (`delivery.Nack(false, requeue)`). It is requeued unless the subscriber was created with `amqp.WithNoRequeueOnNack()`.
+- The handler panics: the message is nacked and the panic continues. Add the `middleware.ConvertPanicToError()` middleware to nack without crashing.
+- With `amqp.WithAutoAck()` the broker considers the message acked on delivery, so acking and nacking do nothing.
+
+Up to `amqp.WithMaxInFlight(n)` handlers (default 10) run at the same time, each in its own goroutine. **Set the prefetch count of the channel (`channel.Qos`) to at least `n`**: with a lower prefetch the broker never delivers enough messages to reach `n` concurrent handlers, and with the default of 0 (unlimited) the broker pushes the whole queue to the client, where it waits in memory while only `n` messages are handled.
+
+`Receive` returns when:
+
+- `ctx` is done: it stops consuming, waits for the in-flight handlers (their messages are acked or nacked as usual) and returns `nil`. Cancelling `ctx` does not cancel the context of the in-flight messages, so handlers can finish. Messages the broker already delivered but that were not handled yet are requeued by the broker when the channel is closed.
+- the deliveries stop while `ctx` is not done, for example because the channel was closed: it waits for the in-flight handlers and returns `amqp.ErrChannelClosed`.
+- the queue does not exist: it returns an error matching `amqp.ErrQueueNotFound`.
+
+The processing timeout (`amqp.WithProcessingTimeout`) is the deadline of `msg.Context()`. A handler that observes the deadline and returns the context error gets its message nacked.
+
+Each `Receive` registers a consumer with an RPC on the channel. amqp091 matches the replies of the RPCs of a channel in order, so never run two RPCs at the same time on the same channel: give each subscriber that you start concurrently its own channel.
+
+A received message has `Payload` set to the body (`[]byte`), `ID` set to the AMQP message id and `Metadata` set to the headers. `Metadata` is empty, never nil, when the delivery has no headers.
+
 ## Usage Patterns
 
 ### 1. Basic Direct Exchange Pattern
@@ -105,13 +128,15 @@ channel.QueueBind(queueName, "email_sending", exchangeName, false, nil)
 
 // Subscribe to the queue
 subscriber, err := amqp.NewAMQPSubscriber(channel, queueName)
-msgCh, err := subscriber.Subscribe(ctx)
 
 go func() {
-    for msg := range msgCh {
+    err := subscriber.Receive(ctx, func(msg *message.Message) error {
         // Process the task - this queue only receives "email_sending" tasks
         log.Printf("Processing email task: %s", string(msg.Payload.([]byte)))
-        msg.Ack() // Acknowledge successful processing
+        return nil // The message is acked. Returning an error nacks it.
+    })
+    if err != nil {
+        log.Printf("Receive failed: %v", err)
     }
 }()
 ```
@@ -161,28 +186,24 @@ err = pubEngine.Publish(msg)
 channel.QueueBind("email-service", "", exchangeName, false, nil)
 channel.QueueBind("analytics-service", "", exchangeName, false, nil)
 
-// Email service subscriber
-emailSubscriber, err := amqp.NewAMQPSubscriber(channel, "email-service")
-emailMsgCh, err := emailSubscriber.Subscribe(ctx)
+// Email service subscriber, on its own channel
+emailChannel, err := conn.Channel()
+emailSubscriber, err := amqp.NewAMQPSubscriber(emailChannel, "email-service")
 
-// Analytics service subscriber  
-analyticsSubscriber, err := amqp.NewAMQPSubscriber(channel, "analytics-service")
-analyticsMsgCh, err := analyticsSubscriber.Subscribe(ctx)
+// Analytics service subscriber, on its own channel
+analyticsChannel, err := conn.Channel()
+analyticsSubscriber, err := amqp.NewAMQPSubscriber(analyticsChannel, "analytics-service")
 
 // All subscribers receive the same messages
-go func() {
-    for msg := range emailMsgCh {
-        log.Printf("Email service processing: %s", string(msg.Payload.([]byte)))
-        msg.Ack()
-    }
-}()
+go emailSubscriber.Receive(ctx, func(msg *message.Message) error {
+    log.Printf("Email service processing: %s", string(msg.Payload.([]byte)))
+    return nil
+})
 
-go func() {
-    for msg := range analyticsMsgCh {
-        log.Printf("Analytics service processing: %s", string(msg.Payload.([]byte)))
-        msg.Ack()
-    }
-}()
+go analyticsSubscriber.Receive(ctx, func(msg *message.Message) error {
+    log.Printf("Analytics service processing: %s", string(msg.Payload.([]byte)))
+    return nil
+})
 ```
 
 ### 3. Topic Pattern Matching Pattern
@@ -231,29 +252,25 @@ msg3 := message.NewMessage(context.Background(), []byte("Payment processed")).
 // Create queues bound with different patterns
 // queue binding required here
 
-// Subscriber for error logs only
-errorSubscriber, err := amqp.NewAMQPSubscriber(channel, errorLogsQueue)
-errorMsgCh, err := errorSubscriber.Subscribe(ctx)
+// Subscriber for error logs only, on its own channel
+errorChannel, err := conn.Channel()
+errorSubscriber, err := amqp.NewAMQPSubscriber(errorChannel, errorLogsQueue)
 
-// Subscriber for all database logs
-databaseSubscriber, err := amqp.NewAMQPSubscriber(channel, databaseLogsQueue)
-databaseMsgCh, err := databaseSubscriber.Subscribe(ctx)
+// Subscriber for all database logs, on its own channel
+databaseChannel, err := conn.Channel()
+databaseSubscriber, err := amqp.NewAMQPSubscriber(databaseChannel, databaseLogsQueue)
 
-go func() {
-    for msg := range errorMsgCh {
-        // Only receives error logs: "logs.auth.error", "logs.payment.error", etc.
-        log.Printf("Error log: %s", string(msg.Payload.([]byte)))
-        msg.Ack()
-    }
-}()
+go errorSubscriber.Receive(ctx, func(msg *message.Message) error {
+    // Only receives error logs: "logs.auth.error", "logs.payment.error", etc.
+    log.Printf("Error log: %s", string(msg.Payload.([]byte)))
+    return nil
+})
 
-go func() {
-    for msg := range databaseMsgCh {
-        // Receives all database logs: "logs.database.info", "logs.database.error.connection", etc.
-        log.Printf("Database log: %s", string(msg.Payload.([]byte)))
-        msg.Ack()
-    }
-}()
+go databaseSubscriber.Receive(ctx, func(msg *message.Message) error {
+    // Receives all database logs: "logs.database.info", "logs.database.error.connection", etc.
+    log.Printf("Database log: %s", string(msg.Payload.([]byte)))
+    return nil
+})
 ```
 
 ### 4. Headers Exchange Pattern
@@ -294,29 +311,25 @@ regularOrder := message.NewMessage(context.Background(), []byte("Order data")).
 
 //queue binding required here
 
-// Subscriber for urgent orders
-urgentSubscriber, err := amqp.NewAMQPSubscriber(channel, urgentOrdersQueue)
-urgentMsgCh, err := urgentSubscriber.Subscribe(ctx)
+// Subscriber for urgent orders, on its own channel
+urgentChannel, err := conn.Channel()
+urgentSubscriber, err := amqp.NewAMQPSubscriber(urgentChannel, urgentOrdersQueue)
 
-// Subscriber for high-value orders
-highValueSubscriber, err := amqp.NewAMQPSubscriber(channel, highValueQueue)
-highValueMsgCh, err := highValueSubscriber.Subscribe(ctx)
+// Subscriber for high-value orders, on its own channel
+highValueChannel, err := conn.Channel()
+highValueSubscriber, err := amqp.NewAMQPSubscriber(highValueChannel, highValueQueue)
 
-go func() {
-    for msg := range urgentMsgCh {
-        // Only receives messages with priority=urgent header
-        log.Printf("Urgent order: %s", string(msg.Payload.([]byte)))
-        msg.Ack()
-    }
-}()
+go urgentSubscriber.Receive(ctx, func(msg *message.Message) error {
+    // Only receives messages with priority=urgent header
+    log.Printf("Urgent order: %s", string(msg.Payload.([]byte)))
+    return nil
+})
 
-go func() {
-    for msg := range highValueMsgCh {
-        // Receives messages with amount=1000 header (or any matching header if "any" match)
-        log.Printf("High-value order: %s", string(msg.Payload.([]byte)))
-        msg.Ack()
-    }
-}()
+go highValueSubscriber.Receive(ctx, func(msg *message.Message) error {
+    // Receives messages with amount=1000 header (or any matching header if "any" match)
+    log.Printf("High-value order: %s", string(msg.Payload.([]byte)))
+    return nil
+})
 ```
 
 ### 5. Reliable Message Delivery Pattern
@@ -383,49 +396,53 @@ err = pubEngine.Publish(msg) // Will fail if not routable due to mandatory flag
 **Test Reference**: See `subscriber_test.go` - configuration tests
 
 **Key Features**:
-- Processing timeouts with custom handlers
+- Processing timeouts as the deadline of the message context
+- Bounded concurrency with `WithMaxInFlight` and the channel prefetch
 - Exclusive consumer access
-- Manual acknowledgment control
 - No requeue on failure options
+- Handlers for failing acks and nacks
 
 **Example Scenario**: High-throughput order processing with timeout protection
 
 ```go
 // From subscriber_test.go - Advanced subscriber configuration
+const maxInFlight = 20
+
+// The prefetch must be at least the number of messages handled at the same time
+err := channel.Qos(maxInFlight, 0, false)
+
 subscriber, err := amqp.NewAMQPSubscriber(
     channel,
     "order-processing-queue",
-    amqp.WithProcessingTimeout(30*time.Second),
-    amqp.WithProcessingTimeoutHandler(func(ctx context.Context, msg *amqpgo.Delivery) {
-        log.Printf("Order processing timed out: %s", msg.MessageId)
-        // Could send to dead letter queue, alert monitoring, etc.
-    }),
+    amqp.WithMaxInFlight(maxInFlight),
+    amqp.WithProcessingTimeout(30*time.Second), // Deadline of msg.Context()
     amqp.WithExclusive(), // Only this consumer can access the queue
     amqp.WithNoRequeueOnNack(), // Failed messages go to DLQ instead of requeue
+    amqp.WithAckErrorHandler(func(msg *message.Message, err error) {
+        log.Printf("Acking order %s failed: %v", msg.ID, err)
+    }),
+    amqp.WithNackErrorHandler(func(msg *message.Message, err error) {
+        log.Printf("Nacking order %s failed: %v", msg.ID, err)
+    }),
 )
-
-msgCh, err := subscriber.Subscribe(ctx)
 
 //queue binding required here
 
-msgCh, err := subscriber.Subscribe(ctx)
-
-go func() {
-    for msg := range msgCh {
-        // Simulate complex order processing
-        if err := processOrder(msg); err != nil {
-            log.Printf("Order processing failed: %v", err)
-            msg.Nack() // Will not requeue due to WithNoRequeueOnNack
-        } else {
-            msg.Ack()
-        }
-    }
-}()
+err = subscriber.Receive(ctx, func(msg *message.Message) error {
+    // Returning an error nacks the message, without requeue due to WithNoRequeueOnNack
+    return processOrder(msg)
+})
 
 func processOrder(msg *message.Message) error {
-    // Complex processing that might timeout
-    time.Sleep(25 * time.Second) // Simulated processing
-    return nil
+    // The context of the message is done after the processing timeout
+    select {
+    case <-time.After(25 * time.Second): // Simulated processing
+        return nil
+    case <-msg.Context().Done():
+        log.Printf("Order processing timed out: %s", msg.ID)
+        // Could alert monitoring, the message goes to the DLQ
+        return msg.Context().Err()
+    }
 }
 ```
 
@@ -534,19 +551,20 @@ defer channel.Close()
 // The publisher and subscriber will automatically handle
 // connection/channel reconnections transparently
 subscriber, err := amqp.NewAMQPSubscriber(channel, queueName)
-msgCh, err := subscriber.Subscribe(ctx)
 
-// Message processing continues even through network disruptions
+// Message processing continues even through network disruptions: Receive consumes
+// the queue again once the channel is reconnected
 go func() {
-    for msg := range msgCh {
+    err := subscriber.Receive(ctx, func(msg *message.Message) error {
         // Processing continues after reconnection
         if err := processMessage(msg); err != nil {
             log.Printf("Processing error: %v", err)
-            msg.Nack()
-        } else {
-            msg.Ack()
+            return err // Nack
         }
-    }
+        return nil // Ack
+    })
+    // nil when ctx is done, amqp.ErrChannelClosed if the channel was closed by the developer
+    log.Printf("Receive returned: %v", err)
 }()
 ```
 
@@ -707,14 +725,15 @@ func createOrderProcessingService() error {
         })).
         AddMiddleware(middleware.ConvertPanicToError())
 
-    // Subscriber for order processing
+    // Subscriber for order processing, the prefetch is at least MaxInFlight
+    if err := channel.Qos(10, 0, false); err != nil {
+        return err
+    }
     subscriber, err := amqp.NewAMQPSubscriber(
         channel,
         "order-processing-queue",
+        amqp.WithMaxInFlight(10),
         amqp.WithProcessingTimeout(30*time.Second),
-        amqp.WithProcessingTimeoutHandler(func(ctx context.Context, msg *amqpgo.Delivery) {
-            log.Printf("Order processing timeout: %s", msg.MessageId)
-        }),
     )
     if err != nil {
         return err
@@ -750,8 +769,9 @@ func createOrderProcessingService() error {
         })).
         AddMiddleware(middleware.ConvertPanicToError())
 
-    // Start processing
-    ctx := context.Background()
+    // Start processing: blocks until ctx is done (returns nil) or receiving fails
+    ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+    defer stop()
     return subEngine.Start(ctx)
 }
 
@@ -831,16 +851,18 @@ amqp.WithMandatoryMsgFn(func(msg *message.Message) (bool, error) {
 ```
 
 ### 4. Performance Optimization
-- Use appropriate queue prefetch settings
+- Set the channel prefetch (`channel.Qos`) to at least `WithMaxInFlight` (default 10)
 - Configure processing timeouts based on workload
 - Monitor queue depths and consumer lag
 - Use exclusive consumers when appropriate
 
 ```go
 // Optimized subscriber configuration
+err := channel.Qos(20, 0, false)
 subscriber, err := amqp.NewAMQPSubscriber(
     channel,
     queueName,
+    amqp.WithMaxInFlight(20),
     amqp.WithProcessingTimeout(30*time.Second),
     amqp.WithExclusive(), // For single consumer scenarios
 )
@@ -904,7 +926,7 @@ go test -v ./amqp -run TestAMQPPublisher
 go test -v ./amqp -run TestAMQPSubscriber
 
 # Run load tests
-go test -v ./amqp -run TestLoad
+go test -v ./amqp -run TestAMQPLoadTest
 ```
 
 ### Running Examples

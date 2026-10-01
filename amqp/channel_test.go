@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/amqp"
 	"github.com/quantumcycle/expedit/amqp/testrabbit"
+	"github.com/quantumcycle/expedit/core/message"
 	amqpgo "github.com/rabbitmq/amqp091-go"
 )
 
@@ -101,44 +102,17 @@ func TestReconnectingChannelConsume(t *testing.T) {
 	})
 }
 
-func TestAMQPSubscriberShutdown(t *testing.T) {
-	t.Run("should close the message channel when the context is cancelled", func(t *testing.T) {
+func TestAMQPSubscriberChannelClosed(t *testing.T) {
+	t.Run("should return ErrChannelClosed when the channel is closed by the developer", func(t *testing.T) {
 		g := NewGomegaWithT(t)
-		conn, channel, err := createTestConnection()
-		g.Expect(err).NotTo(HaveOccurred())
-		defer conn.Close()
-		defer channel.Close()
-		queue := testrabbit.CreateDirectExchangeQueue(channel, "test-subscriber-shutdown-queue")
-		defer queue.Delete()
+		conn, channel := newTestChannel(t)
+		queue := newTestQueue(t, conn, channel, "test-subscriber-chan-closed-queue")
 		sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
 		g.Expect(err).NotTo(HaveOccurred())
-		ctx, cancel := context.WithCancel(context.Background())
-
-		msgCh, err := sub.Subscribe(ctx)
-		g.Expect(err).NotTo(HaveOccurred())
-		cancel()
-
-		g.Eventually(msgCh, 3*time.Second).Should(BeClosed())
-		g.Expect(sub.Err()).NotTo(HaveOccurred())
-	})
-
-	t.Run("should report an error when the channel is closed by the developer", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		conn, channel, err := createTestConnection()
-		g.Expect(err).NotTo(HaveOccurred())
-		defer conn.Close()
-		queue := testrabbit.CreateDirectExchangeQueue(channel, "test-subscriber-chan-closed-queue")
-		defer deleteQueueOnNewChannel(g, conn, queue.QueueName)
-		sub, err := amqp.NewAMQPSubscriber(channel, queue.QueueName)
-		g.Expect(err).NotTo(HaveOccurred())
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		msgCh, err := sub.Subscribe(ctx)
-		g.Expect(err).NotTo(HaveOccurred())
+		run := startReceive(t, conn, sub, queue.QueueName, func(*message.Message) error { return nil })
 
 		g.Expect(channel.Close()).To(Succeed())
 
-		g.Eventually(msgCh, 5*time.Second).Should(BeClosed())
-		g.Expect(sub.Err()).To(HaveOccurred())
+		g.Expect(run.Wait()).To(MatchError(amqp.ErrChannelClosed))
 	})
 }

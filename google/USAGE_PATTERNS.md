@@ -12,7 +12,7 @@ This guide covers Google Pub/Sub-specific features and demonstrates best practic
 - Ordering keys for message sequencing
 - Attributes and metadata conversion
 - GCP emulator setup and testing
-- Processing timeouts and handlers
+- Processing timeouts and graceful shutdown
 - Receive settings optimization
 - Google-specific error handling
 
@@ -26,7 +26,7 @@ This guide covers Google Pub/Sub-specific features and demonstrates best practic
 **Key Features**:
 - Simple one-to-one messaging
 - Basic publisher configuration
-- Straightforward message acknowledgment
+- Acknowledgement driven by the handler result
 - Ideal for getting started or simple notifications
 
 **Example Scenario**: Basic system notifications, simple event logging
@@ -51,18 +51,18 @@ func setupBasicSubscriber(client *pubsub.Client, subscriptionName string) (*goog
 msg := message.NewMessage(context.Background(), []byte("Hello World"))
 err = pubEngine.Publish(msg)
 
-// Basic message consumption
-msgCh, err := subscriber.Subscribe(ctx)
-defer subscriber.Close()
-
-go func() {
-    for msg := range msgCh {
-        // Process the message
-        log.Printf("Received: %s", string(msg.Payload.([]byte)))
-        msg.Ack() // Acknowledge successful processing
-    }
-}()
+// Basic message consumption. Receive blocks until ctx is done or receiving fails.
+// The message is acked when the handler returns nil, and nacked when it returns an error.
+err = subscriber.Receive(ctx, func(msg *message.Message) error {
+    log.Printf("Received: %s", string(msg.Payload.([]byte)))
+    return nil
+})
 ```
+
+`Receive` returns nil once `ctx` is done and the in-flight handlers have returned. The context of the
+messages is not cancelled by the shutdown, so the in-flight handlers can finish and be acknowledged. If
+receiving fails, `Receive` waits for the in-flight handlers and returns the error. A subscription that does
+not exist makes `Receive` return an error matching `google.ErrSubscriptionNotFound` (use `errors.Is`).
 
 ### 2. Ordered Message Processing Pattern
 
@@ -222,13 +222,13 @@ customAttributesProvider := func(msg *message.Message) map[string]string {
 ### 5. Error Handling and Timeout Pattern
 
 **Use Case**: Resilient message processing, fault tolerance  
-**Test Reference**: See `subscriber_test.go` - processing timeout tests
+**Test Reference**: See `subscriber_test.go` - "when the processing timeout is reached" and "should nack when the handler returns an error and redeliver the message" tests
 
 **Key Features**:
-- Configurable processing timeouts
-- Custom timeout handlers
-- Automatic message nacking
-- Graceful failure handling
+- The handler result decides the acknowledgement: nil acks, an error nacks
+- A panicking handler nacks the message, then the panic continues (use `middleware.ConvertPanicToError` to nack without crashing)
+- Configurable processing timeout, set as the deadline of `msg.Context()`
+- Nacked messages are redelivered by Pub/Sub
 
 **Example Scenario**: Payment processing system with timeout protection
 
@@ -236,28 +236,23 @@ customAttributesProvider := func(msg *message.Message) map[string]string {
 // From subscriber_test.go - Subscriber with processing timeout
 subscriber, err := google.NewGoogleSubscriber(setup.Client,
     subscription.Name,
-    google.WithProcessingTimeout(1*time.Second),
-    google.WithProcessingTimeoutHandler(func(ctx context.Context, msg *pubsub.Message) {
-        log.Printf("Message %s timed out, will be nacked", msg.ID)
-        // Custom timeout handling logic here
-    }))
+    google.WithProcessingTimeout(1*time.Second))
 
-// From subscriber_test.go - Handling nacks and retries
-go func() {
-    for msg := range msgCh {
-        nextState := <-msg.StateChange()
-        if nextState == message.Nack {
-            log.Printf("Message %s was nacked, will be retried", msg.ID)
-        }
+err = subscriber.Receive(ctx, func(msg *message.Message) error {
+    // The processing timeout is the deadline of the message context. Pass the context to
+    // everything the handler calls, and return its error: the message is nacked and redelivered.
+    if err := chargeCustomer(msg.Context(), msg); err != nil {
+        return err
     }
-}()
+    return nil
+})
 
-// Error handling in message processing
+// Error handling with a router
 router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("message_type"))
 router.AddDefaultHandler(func(msg *message.Message) error {
     // Simulate processing that might fail
     if shouldFail(msg) {
-        return fmt.Errorf("processing failed: %v", msg.ID)
+        return fmt.Errorf("processing failed: %v", msg.ID) // nack, the message is redelivered
     }
     // Successful processing
     return nil
@@ -351,6 +346,14 @@ func createSubscriber(client *pubsub.Client, subscription string,
     return subEngine, nil
 }
 
+// Start blocks until ctx is done or receiving fails. When ctx is done, it stops receiving, waits for the
+// in-flight handlers and returns nil.
+runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+defer stop()
+if err := subEngine.Start(runCtx); err != nil {
+    panic(err)
+}
+
 // Message routing with typed handlers
 router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
 router.
@@ -387,35 +390,31 @@ subscriber, err := google.NewGoogleSubscriber(setup.Client,
     subscription.Name, 
     google.WithParseAttributes(true)) // Enable automatic parsing
 
-msgCh, err := subscriber.Subscribe(ctx)
+err = subscriber.Receive(ctx, func(msg *message.Message) error {
+    // Attributes are automatically converted to appropriate Go types
 
-go func() {
-    for msg := range msgCh {
-        // Attributes are automatically converted to appropriate Go types
-        
-        // Boolean conversion
-        if boolVal, ok := msg.Metadata["is_active"].(bool); ok {
-            fmt.Printf("Boolean value: %v\n", boolVal)
-        }
-        
-        // Integer conversion  
-        if intVal, ok := msg.Metadata["count"].(int64); ok {
-            fmt.Printf("Integer value: %d\n", intVal)
-        }
-        
-        // Float conversion
-        if floatVal, ok := msg.Metadata["price"].(float64); ok {
-            fmt.Printf("Float value: %f\n", floatVal)
-        }
-        
-        // String values remain as strings
-        if strVal, ok := msg.Metadata["name"].(string); ok {
-            fmt.Printf("String value: %s\n", strVal)
-        }
-        
-        msg.Ack()
+    // Boolean conversion
+    if boolVal, ok := msg.Metadata["is_active"].(bool); ok {
+        fmt.Printf("Boolean value: %v\n", boolVal)
     }
-}()
+
+    // Integer conversion (including "0" and "1")
+    if intVal, ok := msg.Metadata["count"].(int64); ok {
+        fmt.Printf("Integer value: %d\n", intVal)
+    }
+
+    // Float conversion
+    if floatVal, ok := msg.Metadata["price"].(float64); ok {
+        fmt.Printf("Float value: %f\n", floatVal)
+    }
+
+    // String values remain as strings
+    if strVal, ok := msg.Metadata["name"].(string); ok {
+        fmt.Printf("String value: %s\n", strVal)
+    }
+
+    return nil
+})
 
 // Publishing with attributes that will be parsed
 attrs := map[string]string{
@@ -435,7 +434,7 @@ publishMessageWithAttributes(topic, payload, attrs)
 **Key Features**:
 - Custom receive settings for performance tuning
 - Processing timeout configuration
-- Concurrency control
+- Concurrency control: `Receive` maps to `pubsub.Subscription.Receive`, so the number of handlers running at the same time is bounded by `MaxOutstandingMessages` and `NumGoroutines`
 - Memory management
 
 **Example Scenario**: High-throughput system requiring optimized message processing
@@ -452,12 +451,7 @@ subscriber, err := google.NewGoogleSubscriber(setup.Client,
     subscription.Name,
     google.WithReceiveSettings(receiveSettings),
     google.WithProcessingTimeout(30*time.Second),
-    google.WithParseAttributes(true),
-    google.WithProcessingTimeoutHandler(func(ctx context.Context, msg *pubsub.Message) {
-        // Custom logic for timed-out messages
-        log.Printf("Message %s processing timed out", msg.ID)
-        // Could send to dead letter queue, log to monitoring, etc.
-    }))
+    google.WithParseAttributes(true))
 
 // Edge case handling - negative values are handled gracefully
 edgeCaseSettings := pubsub.ReceiveSettings{
@@ -469,8 +463,7 @@ edgeCaseSettings := pubsub.ReceiveSettings{
 subscriber, err := google.NewGoogleSubscriber(setup.Client,
     subscription.Name,
     google.WithReceiveSettings(edgeCaseSettings),
-    google.WithProcessingTimeout(-1*time.Second), // Disables timeout
-    google.WithProcessingTimeoutHandler(nil))     // No timeout handler
+    google.WithProcessingTimeout(-1*time.Second)) // Disables timeout (0 does too)
 ```
 
 ## Best Practices
@@ -478,8 +471,8 @@ subscriber, err := google.NewGoogleSubscriber(setup.Client,
 ### 1. Error Handling
 - Always implement proper error handling in message handlers
 - Use middleware for consistent error logging and monitoring
-- Implement timeout handlers for long-running operations
-- Test error scenarios with message nacking
+- Pass `msg.Context()` to long-running operations, so they stop at the processing timeout
+- Test error scenarios with message nacking (return an error from the handler)
 
 ```go
 // From examples/google/google.go - Error handling middleware
@@ -548,19 +541,20 @@ func NewGoogleTestSetup(t *testing.T, topicPrefix string) *GoogleTestSetup {
 ```
 
 ### 5. Resource Management
-- Properly close subscribers and publishers
-- Use context cancellation for graceful shutdowns
+- Use context cancellation for graceful shutdowns: cancelling the context passed to `Receive` stops receiving, waits for the in-flight handlers and returns nil
+- Wait for `Receive` to return before the process exits
 - Clean up test resources in tests
 
 ```go
-// Proper resource cleanup
-defer subscriber.Close()
-
 // Context-based cancellation
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
+ctx, cancel := context.WithCancel(context.Background())
 
-msgCh, err := subscriber.Subscribe(ctx)
+errCh := make(chan error, 1)
+go func() { errCh <- subscriber.Receive(ctx, handler) }()
+
+// ... later, on shutdown
+cancel()
+err := <-errCh // nil once the in-flight handlers have returned
 ```
 
 ### 6. Production Considerations
@@ -633,14 +627,14 @@ task dd
 - **Test Examples**: `google/publisher_test.go`, `google/subscriber_test.go`
 - **Production Example**: `examples/google/google.go`
 - **Test Utilities**: `google/test_utils_test.go`
-- **Documentation**: `google/USAGE_PATTERNS.md` (this file), `google/test-plan.md`
+- **Documentation**: `google/USAGE_PATTERNS.md` (this file)
 
 ## Dependencies
 
 - **Docker**: Required for running the GCP Pub/Sub emulator
 - **Go 1.19+**: For generics support in circuit breakers and other features
 - **Task**: For running development commands (`go install github.com/go-task/task/v3/cmd/task@latest`)
-- **Testing**: Ginkgo/Gomega for BDD-style testing
+- **Testing**: Gomega for BDD-style testing
 
 ## Contributing
 
@@ -657,13 +651,11 @@ When working with Google Pub/Sub patterns:
 2. Add new test cases following the BDD style (Given/When/Then)
 3. Use unique topic/subscription names to enable parallel test execution
 4. Document the new pattern in this guide with real code examples
-5. Update the test plan (`test-plan.md`) if adding new test categories
 
 ## Additional Resources
 
 - [Google Cloud Pub/Sub Documentation](https://cloud.google.com/pubsub/docs)
 - [Expedit Core Documentation](../core/)
-- [Test Plan](test-plan.md)
 - [Examples](../examples/google/)
 - [Task Configuration](../Taskfile.yml)
 - [Docker Compose](docker-compose.yml)

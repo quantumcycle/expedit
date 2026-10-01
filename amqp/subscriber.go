@@ -12,11 +12,13 @@ import (
 type SubscriberOption func(*SubscriberOptions)
 
 type SubscriberOptions struct {
-	autoAck             bool
-	noRequeueOnNack     bool
-	exclusive           bool
-	processingTimeout   time.Duration
-	onProcessingTimeout func(ctx context.Context, msg *amqp.Delivery)
+	autoAck           bool
+	noRequeueOnNack   bool
+	exclusive         bool
+	processingTimeout time.Duration
+	maxInFlight       int
+	onAckError        func(msg *message.Message, err error)
+	onNackError       func(msg *message.Message, err error)
 }
 
 // WithAutoAck will automatically ack the message when it's received.
@@ -40,23 +42,44 @@ func WithExclusive() SubscriberOption {
 	}
 }
 
-// WithProcessingTimeout will dictate how long a message will be processed before it is nacked.
-// 0 means no timeout, wait forever.
+// WithProcessingTimeout is the deadline of the context of each message, see subscriber.DispatchOptions.
+// 0 means no deadline, which is the default.
 func WithProcessingTimeout(timeout time.Duration) SubscriberOption {
 	return func(opts *SubscriberOptions) {
 		opts.processingTimeout = timeout
 	}
 }
 
-// WithProcessingTimeoutHandler is a function that is called when a message processing times out.
-func WithProcessingTimeoutHandler(handler func(ctx context.Context, msg *amqp.Delivery)) SubscriberOption {
+// WithMaxInFlight is the maximum number of messages handled at the same time, see subscriber.DispatchOptions.
+// Default is subscriber.DefaultMaxInFlight. Set the prefetch count of the channel (Qos) to at least this value, so
+// the broker does not deliver more messages than can be handled.
+func WithMaxInFlight(maxInFlight int) SubscriberOption {
 	return func(opts *SubscriberOptions) {
-		opts.onProcessingTimeout = handler
+		opts.maxInFlight = maxInFlight
 	}
 }
 
+// WithAckErrorHandler is called when acking a message fails. If not provided, the error is ignored.
+func WithAckErrorHandler(handler func(msg *message.Message, err error)) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.onAckError = handler
+	}
+}
+
+// WithNackErrorHandler is called when nacking a message fails. If not provided, the error is ignored.
+func WithNackErrorHandler(handler func(msg *message.Message, err error)) SubscriberOption {
+	return func(opts *SubscriberOptions) {
+		opts.onNackError = handler
+	}
+}
+
+// ErrChannelClosed is returned by Receive when the deliveries stop while ctx is not done.
+var ErrChannelClosed = errors.New("amqp channel closed")
+
 type Subscriber struct {
-	internalSubscriber *subscriber.MessageSubscriber[*amqp.Delivery]
+	channel *ReconnectingChannel
+	queue   string
+	options SubscriberOptions
 }
 
 func NewAMQPSubscriber(channel *ReconnectingChannel, queue string, opts ...SubscriberOption) (*Subscriber, error) {
@@ -65,81 +88,70 @@ func NewAMQPSubscriber(channel *ReconnectingChannel, queue string, opts ...Subsc
 	}
 
 	options := SubscriberOptions{
-		autoAck: false,
+		maxInFlight: subscriber.DefaultMaxInFlight,
 	}
 	for _, opt := range opts {
 		opt(&options)
 	}
 
-	ackFn := func(ctx context.Context, msgImpl *amqp.Delivery) error {
-		if options.autoAck {
-			return nil
-		}
-		return msgImpl.Ack(false)
-	}
-	nackFn := func(ctx context.Context, msgImpl *amqp.Delivery) error {
-		if options.autoAck {
-			return nil
-		}
-		return msgImpl.Nack(false, !options.noRequeueOnNack)
-	}
-	processor := subscriber.MessageProcessor[*amqp.Delivery]{
-		Ack:  ackFn,
-		Nack: nackFn,
-		MessageUnmarshall: func(ctx context.Context, msgImpl *amqp.Delivery) *message.Message {
-			msg := message.NewMessage(ctx, msgImpl.Body)
-			msg.ID = msgImpl.MessageId
-			msg.Metadata = message.Metadata(msgImpl.Headers)
-			return msg
-		},
-		ProcessingTimeout:   options.processingTimeout,
-		OnProcessingTimeout: options.onProcessingTimeout,
-	}
-
-	internalSubscriber := subscriber.MessageSubscriber[*amqp.Delivery]{
-		InitializeFn: func(ctx context.Context, outputCh chan *message.Message, done func(err error)) error {
-			msgsCh, err := channel.Consume(ctx, queue, "",
-				options.autoAck,
-				options.exclusive,
-				false,
-				false,
-				nil)
-			if err != nil {
-				return err
-			}
-			go func() {
-				for {
-					select {
-					case msg, ok := <-msgsCh:
-						if !ok {
-							done(errors.New("amqp channel closed"))
-							return
-						}
-						processor.ProcessMessage(ctx, &msg, outputCh)
-					case <-ctx.Done():
-						//TODO test the context cancelled case
-						done(nil)
-						return
-					}
-				}
-			}()
-			return nil
-		},
-	}
-
 	return &Subscriber{
-		internalSubscriber: &internalSubscriber,
+		channel: channel,
+		queue:   queue,
+		options: options,
 	}, nil
 }
 
-func (s *Subscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {
-	return s.internalSubscriber.Subscribe(ctx)
+// Receive implements subscriber.Subscriber. When ctx is done, the consumer is cancelled. The messages the broker
+// already delivered to the channel but that were not handled yet stay unacked until the channel is closed, and are
+// then requeued by the broker. The prefetch count of the channel bounds how many they are.
+func (s *Subscriber) Receive(ctx context.Context, handler message.HandlerFunc) error {
+	deliveries, err := s.channel.Consume(ctx, s.queue, "", s.options.autoAck, s.options.exclusive, false, false, nil)
+	if err != nil {
+		return err
+	}
+	d := subscriber.NewDispatcher(handler, subscriber.DispatchOptions{
+		MaxInFlight:       s.options.maxInFlight,
+		ProcessingTimeout: s.options.processingTimeout,
+		OnAckError:        s.options.onAckError,
+		OnNackError:       s.options.onNackError,
+	})
+	defer d.Wait()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case delivery, ok := <-deliveries:
+			if !ok {
+				if ctx.Err() != nil {
+					return nil
+				}
+				return ErrChannelClosed
+			}
+			d.Dispatch(ctx, s.delivery(ctx, delivery))
+		}
+	}
 }
 
-func (s *Subscriber) Err() error {
-	return s.internalSubscriber.Err()
-}
-
-func (s *Subscriber) Close() error {
-	return s.internalSubscriber.Close()
+func (s *Subscriber) delivery(ctx context.Context, delivery amqp.Delivery) subscriber.Delivery {
+	msg := message.NewMessage(ctx, delivery.Body)
+	msg.ID = delivery.MessageId
+	if delivery.Headers != nil {
+		msg.Metadata = message.Metadata(delivery.Headers)
+	}
+	return subscriber.Delivery{
+		Message: msg,
+		Ack: func(context.Context) error {
+			if s.options.autoAck {
+				return nil
+			}
+			return delivery.Ack(false)
+		},
+		Nack: func(context.Context) error {
+			if s.options.autoAck {
+				return nil
+			}
+			return delivery.Nack(false, !s.options.noRequeueOnNack)
+		},
+	}
 }

@@ -10,12 +10,13 @@ This guide covers Redis Streams-specific features and demonstrates best practice
 
 **Redis Streams Specific Features Covered:**
 - Consumer groups for load balancing and fault tolerance  
-- Pending message recovery with XCLAIM
+- Pending message recovery with XAUTOCLAIM
 - Metadata and payload separation with prefixes
 - Stream size management with MAXLEN and APPROX
 - Custom ID generation for message ordering
 - JSON serialization utilities
 - Processing timeouts and error handling
+- Backpressure with a bounded number of in-flight messages and a graceful shutdown
 
 ## Usage Patterns
 
@@ -27,7 +28,7 @@ This guide covers Redis Streams-specific features and demonstrates best practice
 **Key Features**:
 - Simple one-to-one messaging
 - Basic publisher configuration  
-- Straightforward message acknowledgment
+- Straightforward message acknowledgment: the handler returns nil to ack, an error to nack
 - Ideal for getting started or simple notifications
 
 **Example Scenario**: Basic system notifications, simple event logging
@@ -57,18 +58,26 @@ msg := message.NewMessage(context.Background(), map[string]interface{}{
 })
 err = pubEngine.Publish(msg)
 
-// Basic message consumption  
-msgCh, err := subscriber.Subscribe(ctx)
-defer subscriber.Close()
-
+// Basic message consumption. Receive blocks until ctx is done or a read fails, so it usually runs in a goroutine.
+// Without a consumer group, acking and nacking do nothing.
 go func() {
-    for msg := range msgCh {
+    err := subscriber.Receive(ctx, func(msg *message.Message) error {
         // Process the message
         log.Printf("Received: %v", msg.Payload)
-        msg.Ack() // Acknowledge successful processing
+        return nil // nil acknowledges the message, an error nacks it
+    })
+    if err != nil {
+        log.Printf("Receive failed: %v", err) // a read failed, restart the subscriber
     }
 }()
+
+// Cancelling ctx stops receiving. Receive waits for the in-flight handlers and returns nil.
 ```
+
+`Receive` calls the handler for each message, in a new goroutine per message, with at most `WithMaxInFlight` (default 10)
+handlers running at the same time. When all the slots are taken, it stops reading, which applies backpressure on the
+stream. A handler that panics nacks its message and the panic continues, so add `middleware.ConvertPanicToError()` to nack
+without crashing.
 
 ### 2. Consumer Groups for Load Balancing
 
@@ -80,6 +89,7 @@ go func() {
 - Message distribution within consumer groups
 - Fault tolerance with pending message recovery
 - Automatic consumer identification
+- A consumer reads at most `WithMaxInFlight` messages at once, so a slow consumer does not hoard messages
 
 **Example Scenario**: Order processing system with multiple worker instances
 
@@ -97,26 +107,17 @@ consumer1, err := setupConsumerGroup(client, "orders-stream", "order-processors"
 consumer2, err := setupConsumerGroup(client, "orders-stream", "order-processors")
 
 // Start both consumers - messages will be distributed between them
-msgCh1, err := consumer1.Subscribe(ctx)
-msgCh2, err := consumer2.Subscribe(ctx)
+go consumer1.Receive(ctx, func(msg *message.Message) error {
+    fmt.Printf("Consumer 1 processing: %v\n", msg.Payload)
+    // Process order...
+    return nil
+})
 
-// Consumer 1 processing
-go func() {
-    for msg := range msgCh1 {
-        fmt.Printf("Consumer 1 processing: %v\n", msg.Payload)
-        // Process order...
-        msg.Ack()
-    }
-}()
-
-// Consumer 2 processing  
-go func() {
-    for msg := range msgCh2 {
-        fmt.Printf("Consumer 2 processing: %v\n", msg.Payload)
-        // Process order...
-        msg.Ack()
-    }
-}()
+go consumer2.Receive(ctx, func(msg *message.Message) error {
+    fmt.Printf("Consumer 2 processing: %v\n", msg.Payload)
+    // Process order...
+    return nil
+})
 
 // Publishing messages - they'll be distributed across consumers
 for i := 0; i < 100; i++ {
@@ -131,11 +132,11 @@ for i := 0; i < 100; i++ {
 ### 3. Fault Tolerance with Pending Message Recovery
 
 **Use Case**: Critical systems requiring guaranteed message processing  
-**Test Reference**: See `subscriber_test.go` - XCLAIM and pending message tests
+**Test Reference**: See `subscriber_test.go` - pending message tests
 
 **Key Features**:
-- Automatic pending message detection
-- XCLAIM for message recovery
+- A nacked message stays pending in the consumer group
+- Any consumer of the group claims a pending message (XAUTOCLAIM) once it has been idle for the pending message idle timeout
 - Configurable idle timeouts
 - Consumer failure handling
 
@@ -153,36 +154,34 @@ func setupFaultTolerantConsumer(client *redis.Client, stream string) (*redis.Sub
 
 // Consumer that might fail
 consumer, err := setupFaultTolerantConsumer(client, "payments-stream")
-msgCh, err := consumer.Subscribe(ctx)
 
-go func() {
-    for msg := range msgCh {
-        // Simulate processing that might fail
-        if shouldFail(msg) {
-            fmt.Printf("Processing failed for message %s, will be nacked\n", msg.ID)
-            msg.Nack() // Message becomes pending for another consumer to claim
-            continue
-        }
-        
-        // Successful processing
-        processPayment(msg.Payload)
-        msg.Ack()
+go consumer.Receive(ctx, func(msg *message.Message) error {
+    // Simulate processing that might fail
+    if shouldFail(msg) {
+        fmt.Printf("Processing failed for message %s, will be nacked\n", msg.ID)
+        // Nacking does nothing in Redis: the message stays pending, and any consumer of the group
+        // claims it once it has been idle for the pending message idle timeout
+        return errors.New("payment failed")
     }
-}()
 
-// Recovery consumer that claims abandoned messages
+    // Successful processing
+    processPayment(msg.Payload)
+    return nil // XACK
+})
+
+// Every consumer of the group also claims the messages abandoned by the others, a nacked message is handled again
+// by whichever consumer claims it first. No dedicated recovery consumer is needed, but a consumer started after a
+// crash recovers the pending messages of the crashed one in the same way.
 recoveryConsumer, err := setupFaultTolerantConsumer(client, "payments-stream")
-recoveryMsgCh, err := recoveryConsumer.Subscribe(ctx)
 
-go func() {
-    for msg := range recoveryMsgCh {
-        fmt.Printf("Recovery consumer claimed message %s\n", msg.ID)
-        // More robust processing for recovered messages
-        processPaymentRobustly(msg.Payload)
-        msg.Ack()
-    }
-}()
+go recoveryConsumer.Receive(ctx, func(msg *message.Message) error {
+    fmt.Printf("Message %s received by the recovery consumer\n", msg.ID)
+    return processPaymentRobustly(msg.Payload)
+})
 ```
+
+A message that keeps failing is claimed again and again. Redis does not count the failed attempts for you, so
+dead-lettering after N attempts has to be done in the handler, for example from the delivery count in `XPENDING`.
 
 ### 4. Metadata and Payload Separation Pattern
 
@@ -460,6 +459,10 @@ router.AddDefaultHandler(func(msg *message.Message) error {
     fmt.Printf("Unhandled message: %v\n", msg.Payload)
     return nil
 })
+
+// The engine wires the router, with its middleware, to Receive. Start blocks until ctx is done or a read fails.
+engine := subscriber.NewSubscriptionEngine(subscriber, *router)
+err = engine.Start(ctx)
 ```
 
 ### 9. Error Handling and Timeout Pattern
@@ -468,9 +471,8 @@ router.AddDefaultHandler(func(msg *message.Message) error {
 **Test Reference**: See `subscriber_test.go` - processing timeout tests
 
 **Key Features**:
-- Configurable processing timeouts
-- Custom timeout handlers  
-- Automatic message nacking
+- Configurable processing timeouts, as the deadline of `msg.Context()`
+- The message is nacked when the handler returns an error, such as the context error after the deadline
 - Graceful failure handling
 
 **Example Scenario**: Image processing service with timeout protection
@@ -480,43 +482,64 @@ router.AddDefaultHandler(func(msg *message.Message) error {
 func createResilientSubscriber(client *redis.Client, stream string) (*redis.Subscriber, error) {
     return redis.NewRedisSubscriber(client, stream,
         redis.WithConsumerGroup("image-processors"),
-        redis.WithProcessingTimeout(30*time.Second), // 30-second timeout
-        redis.WithProcessingTimeoutHandler(func(ctx context.Context, wrapper redis.MessageWrapper) {
-            log.Printf("Image processing timed out for message %s", wrapper.msg.ID)
-            // Could move to dead letter queue, send alert, etc.
-        }))
+        // Deadline of msg.Context(). In consumer group mode it must be below the pending message idle timeout
+        // (default 5 minutes), otherwise NewRedisSubscriber returns an error. When not set, it defaults to 80% of
+        // the pending message idle timeout.
+        redis.WithProcessingTimeout(30*time.Second))
 }
 
 subscriber, err := createResilientSubscriber(client, "images-stream")
-msgCh, err := subscriber.Subscribe(ctx)
 
-go func() {
-    for msg := range msgCh {
-        // Processing with timeout protection
-        err := processImage(msg.Payload)
-        if err != nil {
-            log.Printf("Failed to process image %s: %v", msg.ID, err)
-            msg.Nack() // Will be retried or claimed by another consumer
-            continue
-        }
-        
-        msg.Ack() // Successful processing
+go subscriber.Receive(ctx, func(msg *message.Message) error {
+    // The handler is responsible for honoring the deadline of msg.Context()
+    err := processImage(msg.Context(), msg.Payload)
+    if err != nil {
+        log.Printf("Failed to process image %s: %v", msg.ID, err)
+        return err // Nack: the message is claimed again after the pending message idle timeout
     }
-}()
 
-func processImage(payload interface{}) error {
-    // Simulate image processing that might take too long
+    return nil // Ack
+})
+
+func processImage(ctx context.Context, payload interface{}) error {
     imageData, ok := payload.(map[string]interface{})
     if !ok {
         return fmt.Errorf("invalid image data format")
     }
-    
-    // Heavy processing...
-    time.Sleep(45 * time.Second) // This will trigger timeout handler
-    
-    return nil
+
+    // Heavy processing that stops when the deadline is reached
+    select {
+    case <-time.After(45 * time.Second):
+        return nil
+    case <-ctx.Done():
+        return ctx.Err() // context.DeadlineExceeded after 30 seconds, the message is nacked
+    }
 }
 ```
+
+### Shutdown and read failures
+
+`Receive` returns in one of two ways:
+
+- **ctx is done**: it stops reading, waits for the in-flight handlers and returns nil. The message contexts are not
+  cancelled by the shutdown, so the in-flight messages finish and are acked normally. Receive notices the cancellation
+  between reads, so it returns within `WithBlockTimeout` (default 2 seconds) plus the time of the running handlers.
+- **a read fails** (connection lost, client closed...): it waits for the in-flight handlers and returns the error. There is
+  no automatic retry, restart the subscriber from the caller.
+
+```go
+sub, err := redis.NewRedisSubscriber(client, stream,
+    redis.WithMaxInFlight(20),                      // at most 20 handlers at the same time (and 20 messages per read)
+    redis.WithBlockTimeout(500*time.Millisecond),   // how long a read waits for new messages, bounds the shutdown time
+    redis.WithAckErrorHandler(func(msg *message.Message, err error) {
+        // XACK failed: the message stays pending and will be handled again after the pending idle timeout
+        log.Printf("ack of %s failed: %v", msg.ID, err)
+    }))
+```
+
+Without a consumer group, the default start position `$` is resolved to the ID of the last message of the stream when
+`Receive` starts, so the messages added between two reads are not skipped. Messages added before `Receive` starts are not
+received, use `WithStartID(redis.StartFromBeginning)` to read the whole stream.
 
 ### 10. Complete Production Example
 
@@ -626,7 +649,8 @@ router.AddDefaultHandler(func(msg *message.Message) error {
 - Always implement proper error handling in message handlers
 - Use consumer groups for automatic message recovery
 - Configure appropriate pending message timeouts
-- Implement timeout handlers for long-running operations
+- Make long-running handlers honor the deadline of `msg.Context()`
+- Keep the processing timeout below the pending message idle timeout (NewRedisSubscriber rejects anything else in consumer group mode, and the default is 80% of the idle timeout)
 
 ```go
 // Robust error handling setup
@@ -634,9 +658,8 @@ subscriber, err := redis.NewRedisSubscriber(client, stream,
     redis.WithConsumerGroup("processors"),
     redis.WithPendingMessageIdleTimeout(60*time.Second),
     redis.WithProcessingTimeout(30*time.Second),
-    redis.WithProcessingTimeoutHandler(func(ctx context.Context, wrapper redis.MessageWrapper) {
-        // Log timeout, send to dead letter queue, etc.
-        log.Printf("Message %s timed out", wrapper.msg.ID)
+    redis.WithAckErrorHandler(func(msg *message.Message, err error) {
+        log.Printf("ack of %s failed: %v", msg.ID, err)
     }))
 ```
 
@@ -765,7 +788,7 @@ task dd
 - **Docker**: Required for running Redis in development and testing
 - **Go 1.19+**: For generics support and modern Go features
 - **Task**: For running development commands (`go install github.com/go-task/task/v3/cmd/task@latest`)
-- **Testing**: Ginkgo/Gomega for BDD-style testing
+- **Testing**: Gomega for BDD-style testing
 - **Redis**: Version 6.2+ for full Redis Streams support
 
 ## Contributing
@@ -803,8 +826,10 @@ When working with Redis Streams patterns:
 
 ### Pending Messages
 - Pending messages are automatically tracked in consumer groups
-- Use XCLAIM to recover messages from failed consumers
-- Configure appropriate idle timeouts based on your processing time
+- A nacked message, or a message of a crashed consumer, stays pending until a consumer of the group claims it with XAUTOCLAIM
+- A message is claimed only once it has been idle for the pending message idle timeout, so configure it above the
+  longest processing time, otherwise a message that is still being processed is delivered to a second consumer
+- Handlers can see a message more than once (at-least-once delivery), make them idempotent
 
 ## Additional Resources
 

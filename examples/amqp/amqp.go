@@ -3,6 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"math/rand"
+	"os"
+	"os/signal"
+	"reflect"
+	"strconv"
+	"time"
+
 	"github.com/lithammer/shortuuid/v3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/quantumcycle/expedit/amqp"
@@ -13,10 +20,6 @@ import (
 	examples "github.com/quantumcycle/expedit/example"
 	promware "github.com/quantumcycle/expedit/prometheus/middleware"
 	amqpgo "github.com/rabbitmq/amqp091-go"
-	"math/rand"
-	"reflect"
-	"strconv"
-	"time"
 )
 
 func getTypeName(myvar interface{}) string {
@@ -224,12 +227,13 @@ func main() {
 		panic(err)
 	}
 
-	// Start subscriber in goroutine
+	// Start the subscriber in a goroutine, to publish messages below. On Ctrl+C, Start stops receiving, waits for the
+	// in-flight handlers to finish and returns.
+	runCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+	done := make(chan error, 1)
 	go func() {
-		err := subEngine.Start(ctx)
-		if err != nil {
-			panic(err)
-		}
+		done <- subEngine.Start(runCtx)
 	}()
 
 	//****************** Main loop **********************
@@ -253,10 +257,8 @@ func main() {
 	}
 
 	fmt.Println("AMQP example running. Press Ctrl+C to stop...")
-	waitCh := make(chan bool, 1)
-	examples.CleanupOnInterrupt("amqp_example", func() {
-		fmt.Println("Shutting down...")
-		waitCh <- true
-	})
-	<-waitCh
+	if err := <-done; err != nil {
+		panic(err)
+	}
+	fmt.Println("Shutdown complete")
 }

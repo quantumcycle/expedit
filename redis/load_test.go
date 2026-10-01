@@ -2,6 +2,7 @@ package redis_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -60,6 +61,17 @@ func setupRedisLoadTest(t *testing.T) *loadTestSetup {
 	}
 }
 
+// runConsumer runs Receive in a goroutine tracked by wg, and fails the test if Receive returns an error.
+func runConsumer(t *testing.T, ctx context.Context, wg *sync.WaitGroup, sub *subredis.Subscriber, handler message.HandlerFunc) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := sub.Receive(ctx, handler); err != nil {
+			t.Errorf("Receive failed: %v", err)
+		}
+	}()
+}
+
 func TestRedisLoadTest(t *testing.T) {
 	t.Run("basic throughput test", func(t *testing.T) {
 		g := NewGomegaWithT(t)
@@ -84,6 +96,13 @@ func TestRedisLoadTest(t *testing.T) {
 			streams[i] = fmt.Sprintf("load-test-stream-%d-%d", i, time.Now().UnixNano())
 		}
 
+		consumersCtx, stopConsumers := context.WithCancel(context.Background())
+		var consumersWg sync.WaitGroup
+		defer func() {
+			stopConsumers()
+			consumersWg.Wait()
+		}()
+
 		// Create subscribers for each stream
 		for streamIndex, stream := range streams {
 			consumerGroup := fmt.Sprintf("load-test-group-%d", streamIndex)
@@ -93,32 +112,17 @@ func TestRedisLoadTest(t *testing.T) {
 					stream,
 					subredis.WithConsumerGroup(consumerGroup),
 					subredis.WithConsumerGroupCreateStreamIfMissing(true),
-					subredis.WithConsumerGroupStartID(subredis.StartFromBeginning))
+					subredis.WithConsumerGroupStartID(subredis.StartFromBeginning),
+					subredis.WithBlockTimeout(100*time.Millisecond))
 				g.Expect(err).NotTo(HaveOccurred())
 
-				msgCh, err := subscriber.Subscribe(ctx)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				go func(consumerIndex int, streamIndex int, stream string) {
-					defer subscriber.Close()
-					consumerID := fmt.Sprintf("stream-%d-consumer-%d", streamIndex, consumerIndex)
-
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case msg, ok := <-msgCh:
-							if !ok {
-								return
-							}
-
-							// Record before counting, so the records are complete once the count is reached
-							received.Record(consumerID, msg.ID)
-							atomic.AddInt64(&totalProcessedCount, 1)
-							msg.Ack()
-						}
-					}
-				}(j+1, streamIndex, stream)
+				consumerID := fmt.Sprintf("stream-%d-consumer-%d", streamIndex, j+1)
+				runConsumer(t, consumersCtx, &consumersWg, subscriber, func(msg *message.Message) error {
+					// Record before counting, so the records are complete once the count is reached
+					received.Record(consumerID, msg.ID)
+					atomic.AddInt64(&totalProcessedCount, 1)
+					return nil
+				})
 			}
 		}
 
@@ -201,6 +205,13 @@ func TestRedisLoadTest(t *testing.T) {
 		nbMessagesToSend := 300
 		nackRate := 10 // 10% nack rate for failing consumers
 
+		consumersCtx, stopConsumers := context.WithCancel(context.Background())
+		var consumersWg sync.WaitGroup
+		defer func() {
+			stopConsumers()
+			consumersWg.Wait()
+		}()
+
 		// Create failing consumers that will nack messages then crash
 		nbFailingConsumers := 2
 		failingConsumersDone := make(chan struct{}, nbFailingConsumers)
@@ -211,49 +222,39 @@ func TestRedisLoadTest(t *testing.T) {
 				subredis.WithConsumerGroup(consumerGroup),
 				subredis.WithConsumerGroupCreateStreamIfMissing(true),
 				subredis.WithConsumerGroupStartID(subredis.StartFromBeginning),
-				subredis.WithPendingMessageIdleTimeout(2*time.Second))
+				subredis.WithPendingMessageIdleTimeout(2*time.Second),
+				subredis.WithBlockTimeout(100*time.Millisecond))
 			g.Expect(err).NotTo(HaveOccurred())
 
-			msgCh, err := subscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
+			consumerID := fmt.Sprintf("failing-consumer-%d", j+1)
+			crashCtx, crash := context.WithCancel(consumersCtx)
+			var processedByThisConsumer atomic.Int64
 
-			go func(consumerIndex int) {
-				defer func() {
-					subscriber.Close()
-					failingConsumersDone <- struct{}{}
-				}()
+			consumersWg.Add(1)
+			go func() {
+				defer consumersWg.Done()
+				if err := subscriber.Receive(crashCtx, func(msg *message.Message) error {
+					processed := processedByThisConsumer.Add(1)
 
-				consumerID := fmt.Sprintf("failing-consumer-%d", consumerIndex)
-				processedByThisConsumer := 0
-
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case msg, ok := <-msgCh:
-						if !ok {
-							return
+					// Simulate failure - nack messages and crash after processing some
+					if loadtest.RandomInt(1, 100) <= nackRate || processed > 50 {
+						atomic.AddInt64(&nackCount, 1)
+						if processed > 50 {
+							crash() // Simulate consumer crash
 						}
-
-						processedByThisConsumer++
-
-						// Simulate failure - nack messages and crash after processing some
-						if loadtest.RandomInt(1, 100) <= nackRate || processedByThisConsumer > 50 {
-							atomic.AddInt64(&nackCount, 1)
-							msg.Nack()
-							if processedByThisConsumer > 50 {
-								return // Simulate consumer crash
-							}
-							continue
-						}
-
-						// Record before counting, so the records are complete once the count is reached
-						received.Record(consumerID, msg.ID)
-						atomic.AddInt64(&totalProcessedCount, 1)
-						msg.Ack()
+						return errors.New("simulated failure")
 					}
+
+					// Record before counting, so the records are complete once the count is reached
+					received.Record(consumerID, msg.ID)
+					atomic.AddInt64(&totalProcessedCount, 1)
+					return nil
+				}); err != nil {
+					t.Errorf("Receive failed: %v", err)
 				}
-			}(j + 1)
+				crash()
+				failingConsumersDone <- struct{}{}
+			}()
 		}
 
 		// Publish messages
@@ -289,47 +290,39 @@ func TestRedisLoadTest(t *testing.T) {
 			}
 		}
 
-		// Wait a bit for messages to become pending
-		time.Sleep(3 * time.Second)
-
-		// Create recovery consumers that should claim pending messages
+		// Create recovery consumers that claim the pending messages once they are idle
 		nbRecoveryConsumers := 2
 		for j := 0; j < nbRecoveryConsumers; j++ {
 			subscriber, err := subredis.NewRedisSubscriber(setup.client,
 				stream,
 				subredis.WithConsumerGroup(consumerGroup),
-				subredis.WithPendingMessageIdleTimeout(1*time.Second))
+				subredis.WithPendingMessageIdleTimeout(1*time.Second),
+				subredis.WithBlockTimeout(100*time.Millisecond))
 			g.Expect(err).NotTo(HaveOccurred())
 
-			msgCh, err := subscriber.Subscribe(ctx)
-			g.Expect(err).NotTo(HaveOccurred())
-
-			go func(consumerIndex int) {
-				defer subscriber.Close()
-				consumerID := fmt.Sprintf("recovery-consumer-%d", consumerIndex)
-
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case msg, ok := <-msgCh:
-						if !ok {
-							return
-						}
-
-						// Record before counting, so the records are complete once the count is reached
-						received.Record(consumerID, msg.ID)
-						atomic.AddInt64(&totalProcessedCount, 1)
-						msg.Ack()
-					}
-				}
-			}(j + 1)
+			consumerID := fmt.Sprintf("recovery-consumer-%d", j+1)
+			runConsumer(t, consumersCtx, &consumersWg, subscriber, func(msg *message.Message) error {
+				// Record before counting, so the records are complete once the count is reached
+				received.Record(consumerID, msg.ID)
+				atomic.AddInt64(&totalProcessedCount, 1)
+				return nil
+			})
 		}
 
 		// Wait for all messages to be processed
 		g.Eventually(func() int64 {
 			return atomic.LoadInt64(&totalProcessedCount)
 		}, 30*time.Second).Should(Equal(int64(nbMessagesToSend)))
+
+		// Every message was acked exactly once
+		allIDs := map[string]bool{}
+		for _, consumerID := range []string{"failing-consumer-1", "failing-consumer-2", "recovery-consumer-1", "recovery-consumer-2"} {
+			for _, id := range received.IDs(consumerID) {
+				g.Expect(allIDs).NotTo(HaveKey(id), "message %s was processed twice", id)
+				allIDs[id] = true
+			}
+		}
+		g.Expect(allIDs).To(HaveLen(nbMessagesToSend))
 
 		// Verify we had some nacks (simulated failures)
 		g.Expect(atomic.LoadInt64(&nackCount)).To(BeNumerically(">", 0))
@@ -369,6 +362,13 @@ func TestRedisLoadTest(t *testing.T) {
 			streams[i] = fmt.Sprintf("stress-test-stream-%d-%d", i, time.Now().UnixNano())
 		}
 
+		consumersCtx, stopConsumers := context.WithCancel(context.Background())
+		var consumersWg sync.WaitGroup
+		defer func() {
+			stopConsumers()
+			consumersWg.Wait()
+		}()
+
 		// Create subscribers
 		for streamIndex, stream := range streams {
 			consumerGroup := fmt.Sprintf("stress-test-group-%d", streamIndex)
@@ -379,37 +379,21 @@ func TestRedisLoadTest(t *testing.T) {
 					subredis.WithConsumerGroup(consumerGroup),
 					subredis.WithConsumerGroupCreateStreamIfMissing(true),
 					subredis.WithConsumerGroupStartID(subredis.StartFromBeginning),
-					subredis.WithPendingMessageIdleTimeout(3*time.Second))
+					subredis.WithPendingMessageIdleTimeout(3*time.Second),
+					subredis.WithBlockTimeout(100*time.Millisecond))
 				g.Expect(err).NotTo(HaveOccurred())
 
-				msgCh, err := subscriber.Subscribe(ctx)
-				g.Expect(err).NotTo(HaveOccurred())
-
-				go func(consumerIndex int, streamIndex int) {
-					defer subscriber.Close()
-					consumerID := fmt.Sprintf("stress-stream-%d-consumer-%d", streamIndex, consumerIndex)
-
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case msg, ok := <-msgCh:
-							if !ok {
-								return
-							}
-
-							// Simulate occasional errors
-							if loadtest.RandomInt(1, 100) <= nackRate {
-								nacked.Record(strconv.Itoa(streamIndex), msg.ID)
-								msg.Nack()
-								continue
-							}
-
-							received.Record(consumerID, msg.ID)
-							msg.Ack()
-						}
+				consumerID := fmt.Sprintf("stress-stream-%d-consumer-%d", streamIndex, j+1)
+				runConsumer(t, consumersCtx, &consumersWg, subscriber, func(msg *message.Message) error {
+					// Simulate occasional errors
+					if loadtest.RandomInt(1, 100) <= nackRate {
+						nacked.Record(strconv.Itoa(streamIndex), msg.ID)
+						return errors.New("simulated failure")
 					}
-				}(j+1, streamIndex)
+
+					received.Record(consumerID, msg.ID)
+					return nil
+				})
 			}
 		}
 

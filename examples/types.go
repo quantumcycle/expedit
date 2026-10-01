@@ -1,10 +1,7 @@
 package examples
 
 import (
-	"fmt"
 	"github.com/prometheus/client_golang/prometheus"
-	"os"
-	"os/signal"
 )
 
 type DummyEvent1 struct {
@@ -69,15 +66,4 @@ func CreatePromIncomingDuration(labels []string) *prometheus.HistogramVec {
 		panic(err)
 	}
 	return incomingMsgDuration
-}
-
-func CleanupOnInterrupt(name string, fn func()) {
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt)
-
-	go func() {
-		<-sigs
-		fn()
-		fmt.Printf("Cleanup done for %s\n", name)
-	}()
 }

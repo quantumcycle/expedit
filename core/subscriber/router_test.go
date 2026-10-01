@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	. "github.com/onsi/gomega"
 	"github.com/quantumcycle/expedit/core/message"
@@ -88,40 +87,5 @@ func TestSubscriptionRouter(t *testing.T) {
 
 			g.Expect(func() { router.AddDefaultHandler(func(msg *message.Message) error { return nil }) }).To(Panic())
 		})
-	})
-}
-
-func TestBackoffRetryOnAckNackError(t *testing.T) {
-	t.Run("should retry the operation and not call the fallback when a retry succeeds", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		attempts := 0
-		fn := func(ctx context.Context, m string) error {
-			attempts++
-			if attempts < 3 {
-				return errors.New("transient")
-			}
-			return nil
-		}
-		fallback := func(ctx context.Context, m string, ack bool, f subscriber.AckNackFn[string], err error) {
-			t.Error("fallback must not be called")
-		}
-		handler := subscriber.BackoffRetryOnAckNackError[string](5, time.Millisecond, 5*time.Millisecond, fallback)
-
-		handler(context.Background(), "m", true, fn, errors.New("first failure"))
-
-		g.Expect(attempts).To(Equal(3))
-	})
-
-	t.Run("should call the fallback with the last error when retries are exhausted", func(t *testing.T) {
-		g := NewGomegaWithT(t)
-		boom := errors.New("permanent")
-		fn := func(ctx context.Context, m string) error { return boom }
-		var got error
-		fallback := func(ctx context.Context, m string, ack bool, f subscriber.AckNackFn[string], err error) { got = err }
-		handler := subscriber.BackoffRetryOnAckNackError[string](2, time.Millisecond, 5*time.Millisecond, fallback)
-
-		handler(context.Background(), "m", false, fn, errors.New("first failure"))
-
-		g.Expect(got).To(MatchError(boom))
 	})
 }

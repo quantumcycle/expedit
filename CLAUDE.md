@@ -88,4 +88,5 @@ Each implementation module follows this pattern:
 - Each implementation maintains its own characteristics rather than forcing a common abstraction
 - Middleware is executed in the order added to engines
 - Router panics if no handler is found and no default handler is provided
-- Message acknowledgment (Ack/Nack) is handled by the underlying implementation
+- Messages are acknowledged from the handler result (nil -> Ack, error or panic -> Nack); what Ack/Nack does is up to the underlying implementation
+- `Subscriber.Receive(ctx, handler)` blocks; cancelling ctx drains in-flight handlers without cancelling their message context

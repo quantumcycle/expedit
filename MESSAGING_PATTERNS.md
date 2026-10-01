@@ -34,7 +34,7 @@ pubEngine.
 
 // Subscriber middleware chain - works with any implementation  
 router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
-subEngine := subscriber.NewSubscriptionEngine(anySubscriber, router)
+subEngine := subscriber.NewSubscriptionEngine(anySubscriber, *router)
 subEngine.
     AddMiddleware(authenticationMiddleware).
     AddMiddleware(rateLimitingMiddleware).
@@ -592,18 +592,28 @@ subEngine.AddMiddleware(circuitBreakerMiddleware("payment-service", settings))
 
 ## Implementation-Specific Setup Examples
 
+Every subscriber implements `Receive(ctx, handler)`, so the engine setup is the same for all of them. `Start` blocks
+until ctx is done (after draining the in-flight messages) or receiving fails.
+
+```go
+router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
+subEngine := subscriber.NewSubscriptionEngine(sub, *router)
+if err := subEngine.Start(ctx); err != nil {
+    log.Fatal(err)
+}
+```
+
 ### Google Pub/Sub
 ```go
 import "github.com/quantumcycle/expedit/google"
 
 // Publisher setup
-pub, err := google.NewGooglePublisher(client, routingFunc)
+pub, err := google.NewGooglePublisher(client, publisher.ConstantDestination("my-topic"))
 pubEngine := publisher.NewPublishingEngine(pub)
 
-// Subscriber setup  
-sub, err := google.NewGoogleSubscriber(client, subscriptionName)
-router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
-subEngine := subscriber.NewSubscriptionEngine(sub, router)
+// Subscriber setup, concurrency is limited by the Pub/Sub receive settings
+sub, err := google.NewGoogleSubscriber(client, subscriptionName,
+    google.WithReceiveSettings(pubsub.ReceiveSettings{MaxOutstandingMessages: 100}))
 ```
 
 ### Redis Streams
@@ -611,13 +621,13 @@ subEngine := subscriber.NewSubscriptionEngine(sub, router)
 import "github.com/quantumcycle/expedit/redis"
 
 // Publisher setup
-pub, err := redis.NewRedisPublisher(client, routingFunc)
+pub, err := redis.NewRedisPublisher(client, publisher.ConstantDestination("my-stream"), redis.MarshallPayloadToJsonMap("payload"))
 pubEngine := publisher.NewPublishingEngine(pub)
 
 // Subscriber setup
-sub, err := redis.NewRedisSubscriber(client, consumerGroup, streams)
-router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
-subEngine := subscriber.NewSubscriptionEngine(sub, router)
+sub, err := redis.NewRedisSubscriber(client, "my-stream",
+    redis.WithConsumerGroup("my-group"),
+    redis.WithMaxInFlight(20))
 ```
 
 ### AMQP (RabbitMQ)
@@ -625,13 +635,13 @@ subEngine := subscriber.NewSubscriptionEngine(sub, router)
 import "github.com/quantumcycle/expedit/amqp"
 
 // Publisher setup
-pub, err := amqp.NewAMQPPublisher(connection, routingFunc)
+pub, err := amqp.NewAMQPPublisher(channel, publisher.ConstantDestination("my-exchange"),
+    amqp.ConstantRoutingKey("my-key"), amqp.DefaultMessageOptions{ContentType: "application/json", DeliveryMode: amqpgo.Persistent})
 pubEngine := publisher.NewPublishingEngine(pub)
 
-// Subscriber setup
-sub, err := amqp.NewAMQPSubscriber(connection, queueName)
-router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
-subEngine := subscriber.NewSubscriptionEngine(sub, router)
+// Subscriber setup, with a prefetch of at least MaxInFlight
+err = channel.Qos(20, 0, false)
+sub, err := amqp.NewAMQPSubscriber(channel, queueName, amqp.WithMaxInFlight(20))
 ```
 
 ### Go Channels
@@ -644,9 +654,7 @@ msgChan := make(chan *message.Message, 100)
 pub := publisher.NewChannelPublisher(msgChan)
 pubEngine := publisher.NewPublishingEngine(pub)
 
-sub := subscriber.NewChannelSubscriber(msgChan)
-router := subscriber.NewRouter(subscriber.RouteFromMetadataKey("event_type"))
-subEngine := subscriber.NewSubscriptionEngine(sub, router)
+sub := subscriber.NewChannelSubscriber(msgChan, 10)
 ```
 
 ## Best Practices

@@ -11,41 +11,22 @@ import (
 )
 
 type fakeSubscriber struct {
-	ch           chan *message.Message
-	err          error
-	subscribeErr error
+	err error
 }
 
-func (f *fakeSubscriber) Subscribe(ctx context.Context) (<-chan *message.Message, error) {
-	return f.ch, f.subscribeErr
+func (f *fakeSubscriber) Receive(ctx context.Context, handler message.HandlerFunc) error {
+	return f.err
 }
-func (f *fakeSubscriber) Close() error { return nil }
-func (f *fakeSubscriber) Err() error   { return f.err }
 
 func TestSubscriptionEngineSubscriberErrors(t *testing.T) {
-	newRouter := func() subscriber.SubscriptionRouter {
-		return *subscriber.NewRouter(subscriber.RouteFromMetadataKey("type"))
-	}
-
 	t.Run("Start", func(t *testing.T) {
-		t.Run("should return the terminal error of the subscriber once its channel closes", func(t *testing.T) {
+		t.Run("should return the error of the subscriber", func(t *testing.T) {
 			g := NewGomegaWithT(t)
-			boom := errors.New("receive loop died")
-			sub := &fakeSubscriber{ch: make(chan *message.Message), err: boom}
-			e := subscriber.NewSubscriptionEngine(sub, newRouter())
-			done := startEngine(context.Background(), e)
+			boom := errors.New("receive failed")
+			e := subscriber.NewSubscriptionEngine(&fakeSubscriber{err: boom},
+				*subscriber.NewRouter(subscriber.RouteFromMetadataKey("type")))
 
-			close(sub.ch)
-
-			g.Eventually(done).Should(Receive(MatchError(boom)))
-		})
-
-		t.Run("should return the Subscribe error", func(t *testing.T) {
-			g := NewGomegaWithT(t)
-			sub := &fakeSubscriber{subscribeErr: errors.New("subscribe failed")}
-			e := subscriber.NewSubscriptionEngine(sub, newRouter())
-
-			g.Expect(e.Start(context.Background())).To(MatchError("subscribe failed"))
+			g.Expect(e.Start(context.Background())).To(MatchError(boom))
 		})
 	})
 }

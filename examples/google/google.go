@@ -1,9 +1,16 @@
 package main
 
 import (
-	"cloud.google.com/go/pubsub"
 	"context"
 	"fmt"
+	"math/rand"
+	"os"
+	"os/signal"
+	"reflect"
+	"strconv"
+	"time"
+
+	"cloud.google.com/go/pubsub"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/quantumcycle/expedit/core/message"
 	"github.com/quantumcycle/expedit/core/message/middleware"
@@ -15,11 +22,6 @@ import (
 	"github.com/quantumcycle/expedit/google/emulator"
 	promware "github.com/quantumcycle/expedit/prometheus/middleware"
 	"github.com/sony/gobreaker/v2"
-	"math/rand"
-	"os"
-	"reflect"
-	"strconv"
-	"time"
 )
 
 func getTypeName(myvar interface{}) string {
@@ -144,17 +146,15 @@ func main() {
 	})
 
 	subEngine, err := createSubscriber(client, subscription.Name, router)
-	go func() {
-		err := subEngine.Start(context.TODO())
-		if err != nil {
-			panic(err)
-		}
-	}()
-
+	if err != nil {
+		panic(err)
+	}
 	//****************** Main loop **********************
-	waitCh := make(chan bool, 1)
-	examples.CleanupOnInterrupt("main_wait", func() {
-		waitCh <- true
-	})
-	<-waitCh
+	// On Ctrl+C, Start stops receiving, waits for the in-flight handlers to finish and returns
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := subEngine.Start(runCtx); err != nil {
+		panic(err)
+	}
+	fmt.Println("Shutdown complete")
 }
