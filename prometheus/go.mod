@@ -4,7 +4,7 @@ go 1.22
 
 require (
 	github.com/prometheus/client_golang v1.17.0
-	github.com/quantumcycle/expedit/core v0.0.0-20231105182610-67cd4c7c3f88
+	github.com/quantumcycle/expedit/core v0.0.0-20261001214115-1a7d412e1e6a
 )
 
 require (
