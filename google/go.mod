@@ -1,8 +1,6 @@
 module github.com/quantumcycle/expedit/google
 
-go 1.22
-
-toolchain go1.22.8
+go 1.25.0
 
 require (
 	cloud.google.com/go/pubsub v1.33.0

@@ -1,8 +1,6 @@
 module github.com/quantumcycle/expedit/redis
 
-go 1.22
-
-toolchain go1.22.8
+go 1.25.0
 
 require (
 	github.com/lithammer/shortuuid/v3 v3.0.7

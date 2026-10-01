@@ -14,7 +14,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.23'
+          go-version-file: go.work
 
       - name: Install task
         run: go install github.com/go-task/task/v3/cmd/task@v3.39.2

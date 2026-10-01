@@ -1,12 +1,12 @@
-go 1.22
+go 1.25.0
 
-toolchain go1.22.8
+toolchain go1.25.14
 
 use (
+	./amqp
 	./core
 	./examples
 	./google
 	./prometheus
 	./redis
-	./amqp
 )
